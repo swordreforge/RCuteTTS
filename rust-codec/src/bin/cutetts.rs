@@ -88,6 +88,8 @@ options:
                          timbre; incr = base+idx, old behavior)
   --no-tn                skip text normalization (numbers read as Chinese
                          by default: 4.78→四点七八, 2020年→二零二零年)
+  --print-chunks         print post-TN chunks (with token counts) and exit
+                         (audit what the model actually sees; no synthesis)
   --no-level             skip per-chunk loudness leveling (multi-chunk
                          default: speech RMS leveled to chunk 0, peak 0.98)
   --stream               stream PCM to the wav per AR step (first packet
@@ -482,6 +484,19 @@ fn main() {
     } else {
         cutetts_codec::tn::normalize(&text)
     };
+    if has_flag(&args, "--print-chunks") {
+        let root = PathBuf::from(&model_dir);
+        let tok = PromptTokenizer::load(&root.join("tokenizer/tokenizer.model"));
+        let v = cutetts_codec::chunk::split_sentences(&text);
+        let pieces = if v.len() > 1 { v } else { vec![text.clone()] };
+        for (i, p) in pieces.iter().enumerate() {
+            // exact token count incl. the tts prompt wrapper (what prefill sees)
+            let n = tok.encode_tts(p).len();
+            println!("--- chunk {}/{} ({} chars, {} tokens) ---", i + 1, pieces.len(), p.chars().count(), n);
+            println!("{p}");
+        }
+        return;
+    }
     if let Some(v) = arg_val(&args, "--threads") {
         let n: usize = v.parse().unwrap_or_else(|_| err("--threads must be an integer >= 1"));
         if n < 1 {

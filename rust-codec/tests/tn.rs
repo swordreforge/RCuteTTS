@@ -41,6 +41,25 @@ fn prose_cases() {
 }
 
 #[test]
+fn model_names_digitwise() {
+    assert_eq!(normalize("Qwen3-TTS"), "Qwen三-TTS");
+    assert_eq!(normalize("H100"), "H一零零");
+    assert_eq!(normalize("x86"), "x八六");
+    assert_eq!(normalize("M1"), "M一");
+    assert_eq!(normalize("int8"), "int八");
+    assert_eq!(normalize("RTX4090"), "RTX四零九零");
+    assert_eq!(normalize("AVX-512"), "AVX五一二");
+    assert_eq!(normalize("x86-64"), "x八六六四");
+    assert_eq!(normalize("1.7B模型"), "一点七B模型");
+    assert_eq!(normalize("RTX 4090"), "RTX 四零九零");
+    assert_eq!(normalize("171 毫秒"), "一百七十一 毫秒");
+}
+
+#[test]
+fn year_with_space() {
+    assert_eq!(normalize("2020 年的笔记本"), "二零二零年的笔记本");
+}
+#[test]
 fn passthrough() {
     // pure Chinese prose is byte-identical
     let s = "今天天气真好，我们出去走走吧！";

@@ -97,10 +97,14 @@ pub fn normalize(text: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        // range minus / leading minus
+        // range minus / leading minus / version hyphen (AVX-512 → AVX512)
         if (c == '-' || c == '－') && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
-            let prev_digit = i > 0 && (chars[i - 1].is_ascii_digit() || chars[i - 1] == '.');
-            if prev_digit {
+            let prev = if i > 0 { chars[i - 1] } else { ' ' };
+            if prev.is_ascii_alphabetic() {
+                i += 1; // drop: glued to a model name, digits read by parser
+                continue;
+            }
+            if prev.is_ascii_digit() || prev == '.' {
                 // N-M handled by the number parser's range lookahead; a lone
                 // '-' between digits here means parser already passed — emit 到
                 out.push_str("到");
@@ -111,7 +115,7 @@ pub fn normalize(text: &str) -> String {
             continue;
         }
         if c.is_ascii_digit() {
-            let (word, j) = parse_number(&chars, i);
+            let (word, j) = parse_number(&chars, i, false);
             out.push_str(&word);
             i = j;
             continue;
@@ -134,7 +138,20 @@ pub fn normalize(text: &str) -> String {
 /// Parse a number starting at chars[i] (chars[i] is a digit).
 /// Returns (reading, next index). Consumes optional .frac, % suffix,
 /// and N~M / N-M ranges (emits 到 + second number, recursive once).
-fn parse_number(chars: &[char], i: usize) -> (String, usize) {
+/// Letter-adjacent integers (Qwen3, H100, x86, RTX4090) read digit by
+/// digit — grouped reading ("四千零九十") is for standalone quantities.
+/// Unit suffixes (80GB, 40dB) keep grouped reading; only a letter on the
+/// LEFT (model names) or an explicit force flag (version ranges like
+/// x86-64) triggers digitwise. A 4-digit run before 年 (spaces tolerated:
+/// "2020 年") is a year.
+fn parse_number(chars: &[char], i: usize, force_dw: bool) -> (String, usize) {
+    // look back past dropped version hyphens (AVX-512 → AVX512: prev is X)
+    // and past spaces (RTX 4090: model number after a Latin token).
+    let mut b = i;
+    while b > 0 && (chars[b - 1] == '-' || chars[b - 1] == '－' || chars[b - 1] == ' ' || chars[b - 1] == '　') {
+        b -= 1;
+    }
+    let left_letter = force_dw || (b > 0 && chars[b - 1].is_ascii_alphabetic());
     let mut j = i;
     while j < chars.len() && chars[j].is_ascii_digit() {
         j += 1;
@@ -160,9 +177,16 @@ fn parse_number(chars: &[char], i: usize) -> (String, usize) {
         pct = true;
         j = k + 1;
     }
-    // year: exactly 4 digits + 年 → digit-by-digit
-    let is_year = int_part.len() == 4 && frac.is_none() && j < chars.len() && chars[j] == '年';
+    // year: exactly 4 digits + 年 (spaces tolerated) → digit-by-digit
+    let mut k = j;
+    while k < chars.len() && (chars[k] == ' ' || chars[k] == '　') {
+        k += 1;
+    }
+    let is_year = int_part.len() == 4 && frac.is_none() && k < chars.len() && chars[k] == '年';
     let mut word = if is_year {
+        j = k; // consume the spaces; 年 emits normally next iteration
+        digitwise(&int_part)
+    } else if left_letter {
         digitwise(&int_part)
     } else {
         int_part.parse::<u64>().map(int_zh).unwrap_or_else(|_| digitwise(&int_part))
@@ -174,13 +198,16 @@ fn parse_number(chars: &[char], i: usize) -> (String, usize) {
     if pct {
         word = format!("百分之{word}");
     }
-    // range: sep + digits → 到 + number
+    // range: sep + digits → 到 + number (dropped when glued to a model
+    // name: x86-64 → 八六六四 — the right part inherits digitwise)
     if j < chars.len() && matches!(chars[j], '~' | '～' | '-' | '－' | '–')
         && j + 1 < chars.len()
         && chars[j + 1].is_ascii_digit()
     {
-        let (w2, j2) = parse_number(chars, j + 1);
-        word.push_str("到");
+        let (w2, j2) = parse_number(chars, j + 1, left_letter);
+        if !left_letter {
+            word.push_str("到");
+        }
         word.push_str(&w2);
         j = j2;
     }
