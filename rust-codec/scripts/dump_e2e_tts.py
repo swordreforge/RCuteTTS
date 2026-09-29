@@ -83,6 +83,15 @@ def save(name, t):
 def main() -> None:
     torch.manual_seed(42)
     model = CuteTTS.from_pretrained(ROOT / "model/CuteTTS-distill", device="cpu")
+    if os.environ.get("FP32_CAST") == "1":
+        # same dtype family as the Rust implementation (DiT/VAE already fp32)
+        m = model.runtime.model
+        m.qwen_backbone.float()
+        m.locenc.float()
+        m.locenc_to_lm_proj.float()
+        m.lm_speaker_linear.float()
+        m.stop_predictor.float()
+        print("FP32_CAST on")
     set_sampler_compile_mode("eager")  # after from_pretrained (it resets the mode)
     rt = model.runtime
     with torch.no_grad():
