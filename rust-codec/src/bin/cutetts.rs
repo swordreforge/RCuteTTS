@@ -77,6 +77,9 @@ options:
                          timbre; incr = base+idx, old behavior)
   --no-tn                skip text normalization (numbers read as Chinese
                          by default: 4.78→四点七八, 2020年→二零二零年)
+  --stream               stream PCM to the wav per AR step (first packet
+                         right after prefill + 1 step; raw concat, no
+                         trim/pad/crossfade — test mode)
   --model-dir DIR          default <manifest>/../model/CuteTTS-distill
   --threads N              override CUTETTS_THREADS / ncpu
   --help, -h               this message
@@ -156,6 +159,59 @@ fn read_wav_mono(path: &str) -> (Vec<f32>, usize) {
     (mono, spec.sample_rate as usize)
 }
 
+/// Incremental 16-bit mono wav writer for --stream: header first (sizes
+/// patched at finish), PCM appended per AR step as it is generated.
+struct WavStream {
+    f: std::fs::File,
+    n: u32,
+    sample_rate: u32,
+}
+
+fn wav_header(sample_rate: u32) -> [u8; 44] {
+    let mut h = [0u8; 44];
+    h[0..4].copy_from_slice(b"RIFF");
+    h[8..12].copy_from_slice(b"WAVE");
+    h[12..16].copy_from_slice(b"fmt ");
+    h[16..20].copy_from_slice(&16u32.to_le_bytes());
+    h[20..22].copy_from_slice(&1u16.to_le_bytes());
+    h[22..24].copy_from_slice(&1u16.to_le_bytes());
+    h[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+    h[28..32].copy_from_slice(&(sample_rate * 2).to_le_bytes());
+    h[32..34].copy_from_slice(&2u16.to_le_bytes());
+    h[34..36].copy_from_slice(&16u16.to_le_bytes());
+    h[36..40].copy_from_slice(b"data");
+    h
+}
+
+impl WavStream {
+    fn create(path: &std::path::Path, sample_rate: u32) -> Self {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        f.write_all(&wav_header(sample_rate)).unwrap();
+        WavStream { f, n: 0, sample_rate }
+    }
+
+    fn push(&mut self, samples: &[f32]) {
+        use std::io::Write;
+        let mut buf = Vec::with_capacity(samples.len() * 2);
+        for &v in samples {
+            let s = (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            buf.extend_from_slice(&s.to_le_bytes());
+        }
+        self.f.write_all(&buf).unwrap();
+        self.n += samples.len() as u32;
+    }
+
+    fn finish(mut self) {
+        use std::io::{Seek, SeekFrom, Write};
+        // patch RIFF size + data size
+        self.f.seek(SeekFrom::Start(4)).unwrap();
+        self.f.write_all(&(36 + self.n * 2).to_le_bytes()).unwrap();
+        self.f.seek(SeekFrom::Start(40)).unwrap();
+        self.f.write_all(&(self.n * 2).to_le_bytes()).unwrap();
+    }
+}
+
 fn write_wav_16(path: &std::path::Path, samples: &[f32], sample_rate: u32) {    let mut data = Vec::with_capacity(44 + samples.len() * 2);
     let n = samples.len() as u32;
     data.extend_from_slice(b"RIFF");
@@ -189,6 +245,10 @@ struct CloneCtx {
 /// Synthesize one text piece -> mono 24k samples. Returns (wav, steps).
 /// `chunk_seed` is the effective seed for this piece (caller derives
 /// base+idx for multi-chunk runs so replays are deterministic).
+/// If `stream` is Some, each AR step's 2 latent frames go through the
+/// streaming VAE immediately and PCM is pushed as generated (first packet
+/// right after prefill + 1 step); the returned wav is the same audio
+/// collected in memory (streaming taps match offline to ~1e-7).
 fn synth_one(
     w: &AllW,
     tok: &PromptTokenizer,
@@ -197,7 +257,9 @@ fn synth_one(
     max_steps: usize,
     nth: usize,
     clone: Option<&CloneCtx>,
+    stream: Option<&mut WavStream>,
 ) -> (Vec<f32>, usize) {
+    let t00 = Instant::now();
     // Prefix. tts: text only; clone: full reference chain.
     let (prefix, tpre, spk_opt): (Vec<f32>, usize, Option<Vec<f32>>) = match clone {
         None => {
@@ -214,12 +276,18 @@ fn synth_one(
         }
     };
     let mut cache = QwenCache::empty();
+    let t0 = Instant::now();
     let h = prefill(&w.qwen, &prefix, tpre, 0, &mut cache, nth);
     let mut last = h[(tpre - 1) * 1024..tpre * 1024].to_vec();
+    println!("prefill T={tpre}: {:.2}s", t0.elapsed().as_secs_f32());
 
+    let mut vstream = stream.map(|ws| {
+        (ws, cutetts_codec::stream::StreamingDecoder::new(&w.vae, nth), false)
+    });
     let mut rng = Rng(effective_seed(chunk_seed));
     let mut cond = vec![0.0f32; 128]; // initial previous cond = zeros [1,2,64]
     let mut latents: Vec<f32> = Vec::new();
+    let mut wav_streamed: Vec<f32> = Vec::new();
     let mut steps = 0;
     loop {
         if steps >= max_steps {
@@ -242,11 +310,32 @@ fn synth_one(
         // not pred_latent_scaled; scaled compounds every step).
         let fb = locenc_embed(&w.locenc, &pred, 1, 1, nth);
         cond = pred;
-        latents.extend_from_slice(&scaled);
+        if let Some((ws, dec, first)) = vstream.as_mut() {
+            // scaled is [2,64] row-major; streaming VAE wants [64,2]
+            let mut patch = vec![0.0f32; 128];
+            for k in 0..2 {
+                for c in 0..64 {
+                    patch[c * 2 + k] = scaled[k * 64 + c];
+                }
+            }
+            let pcm = dec.decode_chunk(&patch, 2);
+            debug_assert_eq!(pcm.len(), 3840);
+            ws.push(&pcm);
+            wav_streamed.extend_from_slice(&pcm);
+            if !*first {
+                *first = true;
+                println!("first packet: {:.2}s after chunk start", t00.elapsed().as_secs_f32());
+            }
+        } else {
+            latents.extend_from_slice(&scaled);
+        }
         last = decode_step(&w.qwen, &fb, tpre + steps, &mut cache);
         steps += 1;
     }
 
+    if vstream.is_some() {
+        return (wav_streamed, steps);
+    }
     let nframes = steps * 2;
     let mut frames = vec![0.0f32; 64 * nframes];
     for t in 0..nframes {
@@ -402,6 +491,16 @@ fn main() {
         vec![text]
     };
     let t0 = Instant::now();
+    // --stream: PCM hits the file per AR step (first packet right after
+    // prefill + 1 step). Raw concat — trim/pad/crossfade are skipped in
+    // this test mode (documented; offline output keeps seam hygiene).
+    let streaming = has_flag(&args, "--stream");
+    let mut ws_opt = if streaming {
+        println!("stream: incremental write to {out}");
+        Some(WavStream::create(PathBuf::from(&out).as_path(), 24000))
+    } else {
+        None
+    };
     let mut wavs: Vec<Vec<f32>> = Vec::with_capacity(pieces.len());
     let mut total_steps = 0;
     for (idx, piece) in pieces.iter().enumerate() {
@@ -414,10 +513,17 @@ fn main() {
             println!("--- chunk {}/{} ({} chars, seed={cs}) ---", idx + 1, pieces.len(), piece.chars().count());
         }
         let t1 = Instant::now();
-        let (wav, steps) = synth_one(&w, &tok, piece, cs, max_steps, nth, clone_ctx.as_ref());
+        let (wav, steps) = synth_one(&w, &tok, piece, cs, max_steps, nth, clone_ctx.as_ref(), ws_opt.as_mut());
         println!("chunk {}: {steps} steps, {:.2}s audio ({:.2}s)", idx + 1, wav.len() as f32 / 24000.0, t1.elapsed().as_secs_f32());
         total_steps += steps;
         wavs.push(wav);
+    }
+    println!("total: {total_steps} steps in {:.1}s", t0.elapsed().as_secs_f32());
+    if let Some(ws) = ws_opt {
+        ws.finish();
+        let dur = wavs.iter().map(|v| v.len()).sum::<usize>() as f32 / 24000.0;
+        println!("wrote {out} ({dur:.2}s audio streamed, seed={seed}, chunks={})", pieces.len());
+        return;
     }
     // Seam hygiene (QORA): per-chunk trim to 0.25s max gaps/tails, then
     // 0.15s tail pad, then 30ms crossfade. Trim kills the "waits forever"
@@ -432,7 +538,6 @@ fn main() {
             .collect();
         cutetts_codec::chunk::crossfade_concat(&cleaned, 720)
     };
-    println!("total: {total_steps} steps in {:.1}s", t0.elapsed().as_secs_f32());
     write_wav_16(PathBuf::from(&out).as_path(), &wav, 24000);
     let dur = wav.len() as f32 / 24000.0;
     println!("wrote {out} ({dur:.2}s audio, seed={seed}, chunks={})", pieces.len());
@@ -486,5 +591,29 @@ mod tests {
             }
         }
         panic!("random_seed stuck at 0");
+    }
+
+    #[test]
+    fn wav_stream_roundtrip() {
+        let p = std::env::temp_dir().join("cutetts_wavstream_test.wav");
+        let mut ws = WavStream::create(&p, 24000);
+        ws.push(&[0.0, 0.5, -0.5, 1.5, -2.0]);
+        ws.push(&[0.25; 100]);
+        ws.finish();
+        let raw = std::fs::read(&p).unwrap();
+        assert_eq!(&raw[0..4], b"RIFF");
+        assert_eq!(&raw[8..12], b"WAVE");
+        let riff = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+        let data = u32::from_le_bytes(raw[40..44].try_into().unwrap());
+        assert_eq!(data, 105 * 2);
+        assert_eq!(riff, 36 + 105 * 2);
+        assert_eq!(raw.len(), 44 + 105 * 2);
+        let s = |i: usize| i16::from_le_bytes(raw[44 + i * 2..46 + i * 2].try_into().unwrap());
+        assert_eq!(s(0), 0);
+        assert_eq!(s(1), 16384); // 0.5*32767 rounded
+        assert_eq!(s(2), -16384);
+        assert_eq!(s(3), 32767); // clamped
+        assert_eq!(s(4), -32767);
+        std::fs::remove_file(&p).unwrap();
     }
 }

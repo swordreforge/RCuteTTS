@@ -119,3 +119,10 @@
   ~/-取到/负号/度乘除以），先归一化再分包，`--no-tn` 可关。
 - 门：`tests/chunk.rs` 20 项，`tests/tn.rs` 3 项；result.txt v2：39 包/262.6s，
   单句路径仍 bit-identical。待耳朵验收。
+
+## 15. 流式输出（M25，本轮）
+- `--stream`：每 AR 步 2 帧 latent 直喂 `StreamingDecoder`（M17），PCM 边生成边
+  追加写 wav（header 预写、结束回填），首包 = prefill + 1 步（短句实测 0.12s）。
+- 流式 vs 离线差 3.05e-5 ≈ 1 LSB（int16 量化地板，不可闻）；多包流式为 raw
+  concat（trim/pad/crossfade 跳过，测试模式已在 help 注明）。
+- 门：`wav_stream_roundtrip`（头回填+i16 限幅）；短句流式 e2e 首包+对差。
