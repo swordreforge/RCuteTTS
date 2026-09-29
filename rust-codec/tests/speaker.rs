@@ -46,11 +46,20 @@ fn speaker_full_path() {
         if tag == "spk_wave" {
             let e = max_err(&mel, &refmel);
             println!("{tag}: mel err={e:.2e} time={dt:.2}s");
-            // Frontend gate is structural (catches window/padding/FFT bugs
-            // that err ~10, as seen during bringup). Log domain amplifies
-            // sub-1% energy diffs below ~-9dB, so gate at 5e-2; the tight
-            // gate is the embedding below (InstanceNorm absorbs floor noise).
-            assert!(e < 5e-2, "mel {e:.2e}");
+            // Principled gate: relative error in ENERGY domain. Log-domain
+            // max gates are floor-dominated by construction (22% bins <-9dB);
+            // energy-relative is threshold-free. Structural backstop stays.
+            let mut emax = 0.0f32;
+            let mut ere = 0.0f32;
+            for b in mel.iter() {
+                emax = emax.max(b.exp());
+            }
+            for (a, b) in mel.iter().zip(refmel.iter()) {
+                ere = ere.max((a.exp() - b.exp()).abs());
+            }
+            println!("  energy-rel-err={:.2e} (max energy {:.2e})", ere / emax, emax);
+            assert!(ere / emax < 1e-4, "mel energy-rel");
+            assert!(e < 0.1, "mel structural {e:.2e}");
         }
         let t2 = std::time::Instant::now();
         let emb = speaker_forward(&w, &wave, nth);

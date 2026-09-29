@@ -47,7 +47,7 @@ fn dit_predict_3_vectors() {
         let e: f32 = v.iter().zip(refr.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         worst = worst.max(e);
         println!("dit_p{i:02}: err={e:.2e} time={dt:.2}s");
-        assert!(e < 1e-3, "dit_p{i:02} max_err={e}");
+        assert!(e < 1e-4, "dit_p{i:02} max_err={e}");
     }
     println!("DiT predict gate passed, worst err={worst:.2e}");
 }
@@ -71,7 +71,7 @@ fn dit_predict_plain_no_speaker() {
     let v = predict(&w, &x, t[0], &z, &cond, 0.25, None, 2.0, 1);
     let e: f32 = v.iter().zip(refr.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
     println!("dit_nospk: err={e:.2e}");
-    assert!(e < 1e-3, "dit_nospk max_err={e}");
+    assert!(e < 1e-4, "dit_nospk max_err={e}");
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn dit_euler_sample_2_vectors() {
         let e: f32 = out.iter().zip(refr.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         worst = worst.max(e);
         println!("dit_s{i:02}: err={e:.2e} time={dt:.2}s");
-        assert!(e < 1e-3, "dit_s{i:02} max_err={e}");
+        assert!(e < 1e-4, "dit_s{i:02} max_err={e}");
     }
     println!("DiT euler gate passed, worst err={worst:.2e}");
 }

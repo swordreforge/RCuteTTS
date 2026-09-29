@@ -114,7 +114,7 @@ fn e2e_teacher_forced() {
     assert_eq!(wav.len(), refwav.len());
     let ew = max_err(&wav, &refwav);
     println!("teacher-forced wav err={ew:.2e}");
-    assert!(ew < 1e-3, "wav {ew:.2e}");
+    assert!(ew < 3e-4, "wav {ew:.2e}");
     println!("TEACHER-FORCED PASSED");
 }
 

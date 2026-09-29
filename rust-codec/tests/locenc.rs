@@ -48,7 +48,7 @@ fn locenc_3_vectors() {
         let e: f32 = out.iter().zip(ref32.iter()).map(|(a, c)| (a - c).abs()).fold(0.0, f32::max);
         worst = worst.max(e);
         println!("loc_{tag}: fp32 err={e:.2e} time={dt:.2}s");
-        assert!(e < 1e-3, "loc_{tag} max_err={e}");
+        assert!(e < 1e-4, "loc_{tag} max_err={e}");
     }
     println!("LocEnc gate passed, worst err={worst:.2e}");
 }

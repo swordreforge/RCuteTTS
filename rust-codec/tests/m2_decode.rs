@@ -43,7 +43,7 @@ fn full_decode_10_vectors() {
             .fold(0.0, f32::max);
         worst = worst.max(e);
         println!("m2_{i:02}: frames={frames} samples={} err={e:.2e} time={dt:.1}s", wav.len());
-        assert!(e < 1e-3, "m2_{i:02} max_err={e}");
+        assert!(e < 1e-5, "m2_{i:02} max_err={e}");
     }
     println!("M2 gate passed, worst err={worst:.2e}");
 }

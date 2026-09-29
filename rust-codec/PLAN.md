@@ -51,3 +51,25 @@
 - `weight_norm` 推理需 fuse g/v，`Snake` 逐点三角函数精度漂 → 用 AVX2 mul+add 内核锁 bit。
 - 混合精度：LM bf16 / head fp32 / VAE fp32，Rust 侧统一 F32，scale/bias 逆归一别漏（`model.py:95`）。
 - `decoder_rates` 与 safetensors 实际 shape 不一致时以权重为准，先打印清单再写 forward。
+
+## 6. 门限审计与测试铁律（M17 起执行）
+
+门限只许和测出来的噪声源挂钩。历史放宽记录：
+
+| 门限 | 变更 | 实测 |  verdict |
+|---|---|---|---|
+| simd saxpy FMA 1e-6→1e-5 | 单 op cancellation 1.37e-6 | 数学可算 | ✅ 留，注释已写 |
+| simd gemv8 FMA 1e-6→5e-6 | K=1024 累积漂移 1.08e-6 | 数学可算 | ✅ 留 |
+| hann 1e-9→1e-7 | fp32-vs-f64 7e-9 | 跨库计算顺序 | ✅ 留 |
+| speaker mel 1e-3→5e-2 | 只看了 1-2 个点 | **错** | ❌ 已改能量相对门限 1e-4（实测 1.17e-6），旧门限盖住了响部 2.3e-3——回头看全是 floor 线附近，虚惊，但“只看最差点”是错方法 |
+| qwen 1e-2（出生即松） | fp32 实际 1e-4 | 门限比实测松 100x | ✅ 已收紧 1e-3 |
+| locenc/dit 1e-3（出生即松） | 实际 5~9e-6 | 松 100x+ | ✅ 已收紧 1e-4 |
+| m2 1e-3 | 实际 4.2e-7 | 松 2000x | ✅ 已收紧 1e-5 |
+| e2e teacher wav 1e-3 | 实际 2.2e-5 | 松 45x | ✅ 已收紧 3e-4 |
+
+铁律：
+1. 新测试门限初值 = 首测实测值的 10~100x，不许出生即松 1000x。
+2. 放宽门限必须附带 noise-floor 实验证据（oracle-vs-oracle，如 torch-bf16-vs-fp32），写进测试注释。
+3. 单点 max 超标时，先看全分布（histogram/分位点/位置），再定是 floor 还是系统偏差——mel 事件教训。
+4. 每个 milestone 收紧余量 >100x 的门限（本次已执行）。
+5. 混沌环（e2e 真环）只许断言 stop 序列这类鲁棒量，不许断言波形逐点（torch 自噪实验为证）。

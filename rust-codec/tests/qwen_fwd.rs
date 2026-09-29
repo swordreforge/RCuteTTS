@@ -41,7 +41,7 @@ fn qwen_prefill_decode_chain() {
     println!("prefill T=48: {:.2}s", t0.elapsed().as_secs_f32());
     let e = max_err(&h, &ref_p);
     println!("prefill err={e:.2e}");
-    assert!(e < 1e-2, "prefill max_err={e}");
+    assert!(e < 1e-3, "prefill max_err={e}");
     // chained decodes
     for i in 0..3 {
         let x = load_flat(&format!("qwen_d{i}_fp32"));
@@ -51,7 +51,7 @@ fn qwen_prefill_decode_chain() {
         println!("decode[{i}]: {:.3}s", t1.elapsed().as_secs_f32());
         let e = max_err(&out, &refr);
         println!("decode[{i}] err={e:.2e}");
-        assert!(e < 1e-2, "decode[{i}] max_err={e}");
+        assert!(e < 1e-3, "decode[{i}] max_err={e}");
     }
     println!("Qwen chain gate passed");
 }
