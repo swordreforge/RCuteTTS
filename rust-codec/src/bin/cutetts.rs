@@ -346,12 +346,14 @@ fn synth_one(
     let mut cond = vec![0.0f32; 128]; // initial previous cond = zeros [1,2,64]
     let mut latents: Vec<f32> = Vec::new();
     let mut wav_streamed: Vec<f32> = Vec::new();
+    let mut step_times: Vec<f32> = Vec::new();
     let mut steps = 0;
     loop {
         if steps >= max_steps {
             eprintln!("hit max steps {max_steps}");
             break;
         }
+        let t_step = Instant::now();
         let x0 = rng.normals(128);
         debug_assert!(x0.iter().all(|v| v.is_finite()), "x0 must be finite");
         let sl = stop_logits(&w.e2e, &last);
@@ -389,9 +391,20 @@ fn synth_one(
         }
         last = decode_step(&w.qwen, &fb, tpre + steps, &mut cache);
         steps += 1;
+        if vstream.is_some() {
+            step_times.push(t_step.elapsed().as_secs_f32());
+        }
     }
 
     if vstream.is_some() {
+        // Pacing report: each packet carries 0.16s of audio; a step slower
+        // than 160ms means the player starves (underrun) at that packet.
+        step_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = step_times.len().max(1);
+        let mean = step_times.iter().sum::<f32>() / n as f32;
+        let p99 = step_times[(n * 99 / 100).min(n - 1)];
+        say!(pipe_log, "stream pacing: {} packets, step mean {:.1}ms p99 {:.1}ms (budget 160ms/packet)",
+            n, mean * 1000.0, p99 * 1000.0);
         return (wav_streamed, steps);
     }
     let nframes = steps * 2;
@@ -587,16 +600,17 @@ fn main() {
     }
     say!(pipe, "total: {total_steps} steps in {:.1}s", t0.elapsed().as_secs_f32());
     if let Some(sink) = sink_opt {
+        let wall = t0.elapsed().as_secs_f32();
         match sink {
             Sink::File(ws) => {
                 ws.finish();
                 let dur = wavs.iter().map(|v| v.len()).sum::<usize>() as f32 / 24000.0;
-                say!(pipe, "wrote {out} ({dur:.2}s audio streamed, seed={seed}, chunks={})", pieces.len());
+                say!(pipe, "wrote {out} ({dur:.2}s audio streamed, seed={seed}, chunks={}, RTF={:.2})", pieces.len(), wall / dur);
             }
             Sink::Std(_) => {
                 // raw PCM already fully piped; nothing to patch
                 let dur = wavs.iter().map(|v| v.len()).sum::<usize>() as f32 / 24000.0;
-                say!(pipe, "piped ({dur:.2}s audio streamed, seed={seed}, chunks={})", pieces.len());
+                say!(pipe, "piped ({dur:.2}s audio streamed, seed={seed}, chunks={}, RTF={:.2})", pieces.len(), wall / dur);
             }
         }
         return;
@@ -619,12 +633,12 @@ fn main() {
         let mut raw = StdoutRaw::new();
         raw.push(&wav);
         let dur = wav.len() as f32 / 24000.0;
-        say!(pipe, "piped ({dur:.2}s audio, seed={seed}, chunks={})", pieces.len());
+        say!(pipe, "piped ({dur:.2}s audio, seed={seed}, chunks={}, RTF={:.2})", pieces.len(), t0.elapsed().as_secs_f32() / dur);
         return;
     }
     write_wav_16(PathBuf::from(&out).as_path(), &wav, 24000);
     let dur = wav.len() as f32 / 24000.0;
-    say!(pipe, "wrote {out} ({dur:.2}s audio, seed={seed}, chunks={})", pieces.len());
+    say!(pipe, "wrote {out} ({dur:.2}s audio, seed={seed}, chunks={}, RTF={:.2})", pieces.len(), t0.elapsed().as_secs_f32() / dur);
 }
 
 #[cfg(test)]

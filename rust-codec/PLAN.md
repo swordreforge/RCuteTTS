@@ -133,3 +133,8 @@
 - 门：管道字节 == 文件模式 wav 体（bit-identical）；head 截断干净退出。
 - 播法：`... --output - --stream | play -t raw -r 24000 -e signed -b 16 -c 1 -`
   或 `... | ffplay -f s16le -ar 24000 -ac 1 -i -`。
+
+## 17. 流式实时性仪表（M27，本轮）
+- 三个数：首包（prefill+1 步，短句 0.16s）、步进 pacing（每包 160ms 音频预算，
+  实测 mean 91ms p99 108ms：含逐包 VAE，比离线 AR 纯环慢是单包无 batching 的代价）、
+ 整体 RTF（短句 0.60，含 prefill）。
