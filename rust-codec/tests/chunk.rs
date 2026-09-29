@@ -2,7 +2,7 @@
 //! Pure-logic, no weights. Adapted: our join pipeline is pad_tail-only
 //! (no trim_silence port — pad alone guarantees the fade zone starts
 //! from digital silence on the tail side).
-use cutetts_codec::chunk::{crossfade_concat, pad_tail, split_sentences};
+use cutetts_codec::chunk::{crossfade_concat, pad_tail, split_sentences, trim_silence};
 
 #[test]
 fn split_chinese() {
@@ -132,5 +132,54 @@ fn seam_pipeline_pad_only() {
     assert!(pa[pa.len() - 720..].iter().all(|&v| v == 0.0));
     assert_eq!(joined[pa.len() - 720], 0.0, "fade starts from exact silence");
     assert_eq!(joined.len(), pa.len() + b.len() - 720);
+}
+
+#[test]
+fn trim_compresses_gap() {
+    // speech + 1s silence (50 frames) + speech, max_gap 0.25s (13 frames ceil)
+    let mut x = vec![0.1; 480];
+    x.extend(vec![0.0; 480 * 50]);
+    x.extend(vec![0.1; 480]);
+    let y = trim_silence(&x, 24000, 0.25);
+    assert_eq!(y.len(), 480 * 15, "len={}", y.len());
+}
+
+#[test]
+fn trim_cuts_trailing() {
+    let mut x = vec![0.1; 480];
+    x.extend(vec![0.0; 480 * 50]);
+    let y = trim_silence(&x, 24000, 0.25);
+    assert_eq!(y.len(), 480 * 14, "len={}", y.len()); // 1 speech + 13 gap
+}
+
+#[test]
+fn trim_short_gap_untouched() {
+    let mut x = vec![0.1; 480];
+    x.extend(vec![0.0; 480 * 10]);
+    x.extend(vec![0.1; 480]);
+    assert_eq!(trim_silence(&x, 24000, 0.25), x);
+}
+
+#[test]
+fn trim_all_silence() {
+    assert!(trim_silence(&vec![0.0; 480 * 5], 24000, 0.25).is_empty());
+}
+
+#[test]
+fn trim_leading_kept() {
+    let mut x = vec![0.0; 480 * 5];
+    x.extend(vec![0.1; 480]);
+    assert_eq!(trim_silence(&x, 24000, 0.25), x);
+}
+
+#[test]
+fn trim_then_pad_bounds_tail() {
+    // hot tail + 2s trailing silence: tail must shrink to [0.15, 0.25]s
+    let mut a = speech(19200, 0.2);
+    a.extend(vec![0.0; 48000]);
+    let t = trim_silence(&a, 24000, 0.25);
+    let p = pad_tail(&t, 24000, 0.15);
+    let tail = p.len() - 19200;
+    assert!(tail >= 3600 && tail <= 6000 + 480, "tail={tail}");
     println!("CHUNK gates passed");
 }

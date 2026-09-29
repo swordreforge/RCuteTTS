@@ -109,3 +109,13 @@
 - 对照：better-tail-HNR.wav（QORA 1.7B）277.6s ≈ 6 字/s 正常语速；我们单 prefix 36.6s ≈ 46 字/s 且跳段。
 - 做法：移植 QORA `chunk.rs`（split_sentences 中英标点+小数/Mr. 守卫+150 字硬切，pad_tail 0.15s，crossfade 720=30ms）→ `src/chunk.rs`；CLI `--text-file` 多句自动分包，chunk seed=base+idx，单句路径无 pad 保持 bit-identical（--seed 12345 replay 验证）。
 - 门：`tests/chunk.rs` 14 项（含 result.txt 真实文本无损切分）；result.txt→39 chunks/1618 步/263s（RTF~0.44），与 277s 参考同量级。
+
+## 14. 分包三修（M24，本轮听感反馈）
+- 包尾长静音（"总结与建议"前久等）：只 pad 不 trim，尾静音原样保留。移植 QORA
+  `trim_silence`（内部/尾部静音压到 0.25s）→ trim→pad(0.15)→crossfade(720)。
+- 逐句音色漂移：chunk seed=base+idx 使每包 x0 流不同。加 `--chunk-seeds same|incr`，
+  默认 same（全包同一种子，音色稳定；复现仍确定）。
+- 数字乱读：QORA 无 TN，新写 `src/tn.rs`（整数万亿分组/小数点/百分之/4位+年逐位/
+  ~/-取到/负号/度乘除以），先归一化再分包，`--no-tn` 可关。
+- 门：`tests/chunk.rs` 20 项，`tests/tn.rs` 3 项；result.txt v2：39 包/262.6s，
+  单句路径仍 bit-identical。待耳朵验收。

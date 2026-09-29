@@ -125,6 +125,58 @@ pub fn pad_tail(audio: &[f32], sample_rate: u32, min_tail_secs: f32) -> Vec<f32>
     out
 }
 
+/// Compress internal silences longer than `max_gap_secs` down to `max_gap_secs`
+/// and trim trailing silence beyond `max_gap_secs`.
+/// Frame = 20ms, speech threshold = mean square energy >= 1e-4.
+/// (QORA-TTS-12Hz-1.7B `src/wav.rs::trim_silence`, verbatim port.)
+pub fn trim_silence(audio: &[f32], sample_rate: u32, max_gap_secs: f32) -> Vec<f32> {
+    if audio.is_empty() || max_gap_secs <= 0.0 {
+        return audio.to_vec();
+    }
+    let frame = (sample_rate as usize / 50).max(1);
+    let max_gap_frames = ((max_gap_secs * sample_rate as f32) / frame as f32).ceil() as usize;
+
+    // Classify frames
+    let n_frames = audio.len().div_ceil(frame);
+    let mut is_speech = vec![false; n_frames];
+    for (i, s) in is_speech.iter_mut().enumerate() {
+        let end = ((i + 1) * frame).min(audio.len());
+        let seg = &audio[i * frame..end];
+        let e: f32 = seg.iter().map(|v| v * v).sum::<f32>() / seg.len() as f32;
+        *s = e >= 1e-4;
+    }
+
+    // Find last speech frame; drop everything after last_speech + max_gap_frames
+    let Some(last_speech) = is_speech.iter().rposition(|&s| s) else {
+        return Vec::new();
+    };
+    let keep_frames = (last_speech + 1 + max_gap_frames).min(n_frames);
+
+    // Copy, skipping the middle of over-long internal gaps
+    let mut out: Vec<f32> = Vec::with_capacity(audio.len());
+    let mut i = 0;
+    while i < keep_frames {
+        if is_speech[i] {
+            let end = ((i + 1) * frame).min(audio.len());
+            out.extend_from_slice(&audio[i * frame..end]);
+            i += 1;
+        } else {
+            let mut j = i;
+            while j < keep_frames && !is_speech[j] {
+                j += 1;
+            }
+            let gap = j - i;
+            let keep = gap.min(max_gap_frames);
+            for k in i..i + keep {
+                let end = ((k + 1) * frame).min(audio.len());
+                out.extend_from_slice(&audio[k * frame..end]);
+            }
+            i = j;
+        }
+    }
+    out
+}
+
 /// Output len = sum - fade_len * (n-1). fade_len clamped to shortest chunk.
 /// Concatenate chunks with a linear crossfade of `fade_len` samples.
 pub fn crossfade_concat(chunks: &[Vec<f32>], fade_len: usize) -> Vec<f32> {

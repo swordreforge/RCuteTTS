@@ -17,4 +17,5 @@ pub mod stream;
 pub mod tok;
 pub mod vae_enc;
 pub mod snake;
+pub mod tn;
 pub mod weights;

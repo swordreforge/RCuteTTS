@@ -73,6 +73,10 @@ options:
   --output PATH            output wav (16-bit mono 24kHz, overwritten)
   --seed N                 u64 seed; default = random each run (printed, reuse to replay)
   --max-steps N            default 750 (each step = 2 latent frames = 0.16s)
+  --chunk-seeds same|incr default same (one seed for all chunks: stable
+                         timbre; incr = base+idx, old behavior)
+  --no-tn                skip text normalization (numbers read as Chinese
+                         by default: 4.78→四点七八, 2020年→二零二零年)
   --model-dir DIR          default <manifest>/../model/CuteTTS-distill
   --threads N              override CUTETTS_THREADS / ncpu
   --help, -h               this message
@@ -304,6 +308,17 @@ fn main() {
         Some(v) => v.parse().unwrap_or_else(|_| err("--max-steps must be an integer")),
         None => 750,
     };
+    let chunk_seeds = arg_val(&args, "--chunk-seeds").unwrap_or_else(|| "same".to_string());
+    if chunk_seeds != "same" && chunk_seeds != "incr" {
+        err("--chunk-seeds must be same or incr");
+    }
+    // Text normalization first (numbers → Chinese), then chunking.
+    // TN removes numeric dots, which also makes sentence splitting safer.
+    let text = if has_flag(&args, "--no-tn") {
+        text
+    } else {
+        cutetts_codec::tn::normalize(&text)
+    };
     if let Some(v) = arg_val(&args, "--threads") {
         let n: usize = v.parse().unwrap_or_else(|_| err("--threads must be an integer >= 1"));
         if n < 1 {
@@ -390,7 +405,11 @@ fn main() {
     let mut wavs: Vec<Vec<f32>> = Vec::with_capacity(pieces.len());
     let mut total_steps = 0;
     for (idx, piece) in pieces.iter().enumerate() {
-        let cs = seed.wrapping_add(idx as u64);
+        // Chunk seed policy: `same` reuses the base seed every chunk
+        // (stable timbre — the x0 stream shapes voice color; per-chunk
+        // variation is what made each sentence sound like a new speaker).
+        // `incr` reproduces the old base+idx behavior.
+        let cs = if chunk_seeds == "incr" { seed.wrapping_add(idx as u64) } else { seed };
         if pieces.len() > 1 {
             println!("--- chunk {}/{} ({} chars, seed={cs}) ---", idx + 1, pieces.len(), piece.chars().count());
         }
@@ -400,14 +419,18 @@ fn main() {
         total_steps += steps;
         wavs.push(wav);
     }
-    // Seam hygiene (QORA): per-chunk 0.15s tail pad, then 30ms crossfade.
+    // Seam hygiene (QORA): per-chunk trim to 0.25s max gaps/tails, then
+    // 0.15s tail pad, then 30ms crossfade. Trim kills the "waits forever"
+    // long tails; pad guarantees the fade starts from digital silence.
     // Single piece: write as-is (no pad — bit-identical to old behavior).
     let wav: Vec<f32> = if wavs.len() == 1 {
         wavs.pop().unwrap()
     } else {
-        let padded: Vec<Vec<f32>> =
-            wavs.iter().map(|a| cutetts_codec::chunk::pad_tail(a, 24000, 0.15)).collect();
-        cutetts_codec::chunk::crossfade_concat(&padded, 720)
+        let cleaned: Vec<Vec<f32>> = wavs
+            .iter()
+            .map(|a| cutetts_codec::chunk::pad_tail(&cutetts_codec::chunk::trim_silence(a, 24000, 0.25), 24000, 0.15))
+            .collect();
+        cutetts_codec::chunk::crossfade_concat(&cleaned, 720)
     };
     println!("total: {total_steps} steps in {:.1}s", t0.elapsed().as_secs_f32());
     write_wav_16(PathBuf::from(&out).as_path(), &wav, 24000);
