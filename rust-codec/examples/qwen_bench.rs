@@ -25,6 +25,13 @@ fn main() {
     let pre = load_flat("qwen_p_fp32");
     let ref_p = load_flat("qwen_p_out_fp32");
     prefill(&w, &pre, 48, 0, &mut cache, nth); // warmup
+    // cold-vs-warm check + T=71 scaling probe (CLI prefill anomaly)
+    let mut c71 = QwenCache::empty();
+    let mut pre71 = vec![0.0f32; 71 * 1024];
+    pre71[..48 * 1024].copy_from_slice(&pre);
+    let t71 = std::time::Instant::now();
+    prefill(&w, &pre71, 71, 0, &mut c71, nth);
+    println!("prefill T=71: {:.3}s", t71.elapsed().as_secs_f32());
     let reps = 5;
     let t0 = Instant::now();
     for _ in 0..reps {

@@ -29,7 +29,7 @@ fn sinc_kernel(orig: usize, new: usize, width: usize, base_freq: f64) -> Vec<f32
             t *= base_freq;
             t = t.clamp(-6.0, 6.0);
             let window = (t * PI / 6.0 / 2.0).cos().powi(2);
-            let mut v = t * PI;
+            let v = t * PI;
             let s = if v == 0.0 { 1.0 } else { v.sin() / v };
             // scale = base_freq / orig
             *dst = (s * window * (base_freq / orig as f64)) as f32;
