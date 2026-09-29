@@ -34,7 +34,7 @@
 - M2 整句 decode 对齐：Python dump `latent[64,T]` → Rust decode → `max_abs_err < 1e-4`，10 条样本全过。✅ done：10/10 全过，worst err 4.2e-7（门限放宽到 1e-3，实际近 bit 级），见 `tests/m2_decode.rs` + `scripts/dump_m2_vectors.py`；naive 单线程基线：0.64s 音频 4.1s（RTF 6.4），M3 优化空间明确
 - M3 性能：AVX2 + 线程池，单句 decode RTF < 0.5，与 Python 版同句对比。✅ done：naive 单线程 RTF 6.4 → 并行 + f32 + 边界剥离 + 1x1 SAXPY 后 RTF 0.31（1.92s 音频 0.6s，22线程，`CUTETTS_THREADS` 可调），对齐误差仍 5.6e-7；`target-cpu=native` 无额外收益，未采用
 - M4 接入：Python `AudioStreamingVAEDecoder` 后端可切换 `rust|torch`，`inference` 端到端回归（tts + voice_clone各3条）。✅ done（范围：整句 offline `decode()` 经 `CUTETTS_VAE_BACKEND=rust` 切换，见 `src/cutetts/modeling/rust_vae.py` + `src/ffi.rs`；voice_clone 流式仍走 torch）：单元 err 3.9e-7，e2e 3条 tts err ~2e-6，voice_clone 冒烟过。
-- M5（pivot）：FFI 对比有拷贝/线程池污染，改干净对比——`scripts/bench_torch_decode.py`（纯 torch）vs `src/bin/decode_bench.rs`（纯 Rust binary，同 latent npy）。24帧：torch 0.209s（RTF 0.109）vs rust 0.254s（RTF 0.132），rust 慢 1.22x；120帧：torch 1.202s vs rust 1.301s，差距收窄到 1.08x。对齐 err 3.7e-7。结论：正确性已锁，差的是 GEMM 内核（MKL 有 AVX512/FMA + B-pack + 预取，我们只有朴素 FMA 循环靠 autovec）。下一步：手写 AVX2/FMA 8xN 微内核。
+- M6 GEMM 内核（本轮）：读 QORA `simd.rs`（AVX2 mul+add 保 bit-exact、FMA 另门控）+ `gemv.rs` 调度做对照。发现三点：①本机无 AVX512（155H），QORA 的 512 路径跑不到；②我们之前靠 autovec，默认只编出 SSE（4-wide、无 FMA），MKL 是 AVX2+FMA（8-wide融合），理论差 4x；③`env::var` 写在内层 dispatch 里，整句约 4500 万次调用，全烧在 getenv（m2 全量从 2.6s 涨到 68s，抓包确认）。修法：`src/simd.rs` 手写 SAXPY（exact mul+add 与 scalar bit 一致，FMA 单舍入，`CUTETTS_FMA=0` 可回 exact）+ `resolve_saxpy()` 一次提升。结果：24帧 0.254→0.224s（RTF 0.116，torch 0.209/0.109，差 7%）；120帧 1.153s vs torch 1.202s，反超 4%。FMA 版 err 3.32e-7 反比 exact（3.73e-7）更接近 torch——佐证 MKL 内部也是 FMA。剩 7% 在循环顺序：C tile 每 K 迭代 load+store 一次，寄存器分块（GotoBLAS式 MR×NR，C 常驻 ymm）可补，下一刀。
 
 ## 5. 风险
 

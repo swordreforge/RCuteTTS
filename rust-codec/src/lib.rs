@@ -2,5 +2,7 @@ pub mod conv;
 pub mod decode;
 pub mod decoder;
 pub mod ffi;
+pub mod gemm;
+pub mod simd;
 pub mod snake;
 pub mod weights;
