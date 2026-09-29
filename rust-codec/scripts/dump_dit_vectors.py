@@ -84,19 +84,28 @@ def main() -> None:
             for tag, ten in [("x", x), ("t", t), ("z", z), ("cond", cond),
                              ("spk", spk), ("out", v)]:
                 save(f"dit_p{i:02d}_{tag}", ten)
-        # B. full sample()
+        # B. explicit Euler (mirrors _euler_sample_core, patch_size==2 branch):
+        # x0 = randn, then 4x _predict(t=step*0.25, dt=0.25), x += v*dt.
+        # Validations are no-ops numerically; x0 saved for Rust replay.
         for i in range(2):
             torch.manual_seed(300 + i)
             z = torch.randn(1, 1024)
             cond = torch.randn(1, 2, 64)
             spk = torch.randn(1, 256)
-            out = head.sample(z, cfg=0.0, num_sampling_steps=4, cond=cond,
-                              speaker_embedding=spk, sway_sampling_coefficient=0.0,
-                              distilled_cfg_strength=2.0)
+            x = torch.randn(1, 2, 64)
+            x0 = x.clone()
+            for step in range(4):
+                t = torch.full((1,), step * 0.25)
+                v = head._predict(x.reshape(1, 2, 64), t, z, cond,
+                                  dt=torch.full((1,), 0.25),
+                                  speaker_embedding=spk, cfg_strength=2.0,
+                                  validate_conditions=False)
+                x = x + v * 0.25
             save(f"dit_s{i:02d}_z", z)
             save(f"dit_s{i:02d}_cond", cond)
             save(f"dit_s{i:02d}_spk", spk)
-            save(f"dit_s{i:02d}_out", out)
+            save(f"dit_s{i:02d}_x0", x0)
+            save(f"dit_s{i:02d}_out", x)
     print("done ->", OUT)
 
 
