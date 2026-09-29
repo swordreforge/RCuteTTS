@@ -177,6 +177,68 @@ pub fn trim_silence(audio: &[f32], sample_rate: u32, max_gap_secs: f32) -> Vec<f
     out
 }
 
+/// Speech-gated RMS (20ms frames, 1e-4 threshold — same convention as
+/// trim/pad): measures speech loudness, not pause content. Falls back to
+/// plain RMS when no frame qualifies (avoids div-by-zero on silence).
+pub fn speech_rms(audio: &[f32], sample_rate: u32) -> f32 {
+    if audio.is_empty() {
+        return 0.0;
+    }
+    let frame = (sample_rate as usize / 50).max(1);
+    let n_frames = audio.len().div_ceil(frame);
+    let mut num = 0.0f64;
+    let mut den = 0usize;
+    for i in 0..n_frames {
+        let end = ((i + 1) * frame).min(audio.len());
+        let seg = &audio[i * frame..end];
+        let e: f32 = seg.iter().map(|v| v * v).sum::<f32>() / seg.len() as f32;
+        if e >= 1e-4 {
+            num += seg.iter().map(|v| (v * v) as f64).sum::<f64>();
+            den += seg.len();
+        }
+    }
+    if den == 0 {
+        let n = audio.len();
+        return (audio.iter().map(|v| (v * v) as f64).sum::<f64>() / n as f64).sqrt() as f32;
+    }
+    (num / den as f64).sqrt() as f32
+}
+
+/// Level multi-chunk loudness: scale every chunk's speech RMS to the
+/// median across chunks (robust anchor — chunk 0 is often an outlier).
+/// Medians over nonzero values only; all-silent input → gains of 1.
+/// Gains clamped to [0.25, 4.0] so a silence-heavy chunk can't explode
+/// into noise. Returns (leveled chunks, gains).
+pub fn level_chunks(chunks: &[Vec<f32>], sample_rate: u32) -> (Vec<Vec<f32>>, Vec<f32>) {
+    if chunks.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut rs: Vec<f32> = chunks.iter().map(|c| speech_rms(c, sample_rate)).filter(|&r| r > 1e-6).collect();
+    rs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let anchor = rs.get(rs.len() / 2).copied().unwrap_or(0.0);
+    let mut out = Vec::with_capacity(chunks.len());
+    let mut gains = Vec::with_capacity(chunks.len());
+    for c in chunks {
+        let r = speech_rms(c, sample_rate);
+        let mut g = if r > 1e-6 && anchor > 1e-6 { anchor / r } else { 1.0 };
+        g = g.clamp(0.25, 4.0);
+        gains.push(g);
+        out.push(c.iter().map(|v| v * g).collect());
+    }
+    (out, gains)
+}
+
+/// Global peak guard: scale down so peak <= `ceiling` (default 0.98).
+/// Bit-preserving when already under the ceiling.
+pub fn peak_guard(audio: &[f32], ceiling: f32) -> Vec<f32> {
+    let peak = audio.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+    if peak <= ceiling || peak <= 0.0 {
+        return audio.to_vec();
+    }
+    let g = ceiling / peak;
+    audio.iter().map(|v| v * g).collect()
+}
+
 /// Output len = sum - fade_len * (n-1). fade_len clamped to shortest chunk.
 /// Concatenate chunks with a linear crossfade of `fade_len` samples.
 pub fn crossfade_concat(chunks: &[Vec<f32>], fade_len: usize) -> Vec<f32> {

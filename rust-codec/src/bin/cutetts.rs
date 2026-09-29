@@ -88,6 +88,8 @@ options:
                          timbre; incr = base+idx, old behavior)
   --no-tn                skip text normalization (numbers read as Chinese
                          by default: 4.78→四点七八, 2020年→二零二零年)
+  --no-level             skip per-chunk loudness leveling (multi-chunk
+                         default: speech RMS leveled to chunk 0, peak 0.98)
   --stream               stream PCM to the wav per AR step (first packet
                          right after prefill + 1 step; raw concat, no
                          trim/pad/crossfade — test mode)
@@ -175,7 +177,6 @@ fn read_wav_mono(path: &str) -> (Vec<f32>, usize) {
 struct WavStream {
     f: std::fs::File,
     n: u32,
-    sample_rate: u32,
 }
 
 fn wav_header(sample_rate: u32) -> [u8; 44] {
@@ -199,7 +200,7 @@ impl WavStream {
         use std::io::Write;
         let mut f = std::fs::File::create(path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
         f.write_all(&wav_header(sample_rate)).unwrap();
-        WavStream { f, n: 0, sample_rate }
+        WavStream { f, n: 0 }
     }
 
     fn push(&mut self, samples: &[f32]) {
@@ -616,17 +617,31 @@ fn main() {
         return;
     }
     // Seam hygiene (QORA): per-chunk trim to 0.25s max gaps/tails, then
-    // 0.15s tail pad, then 30ms crossfade. Trim kills the "waits forever"
-    // long tails; pad guarantees the fade starts from digital silence.
+    // level speech RMS to chunk 0 (independent AR trajectories drift in
+    // loudness — official has no leveling either, single runs hide it),
+    // then 0.15s tail pad, then 30ms crossfade, then a global 0.98 peak
+    // guard. Trim kills the "waits forever" long tails; pad guarantees
+    // the fade starts from digital silence.
     // Single piece: write as-is (no pad — bit-identical to old behavior).
     let wav: Vec<f32> = if wavs.len() == 1 {
         wavs.pop().unwrap()
     } else {
-        let cleaned: Vec<Vec<f32>> = wavs
+        let trimmed: Vec<Vec<f32>> = wavs
             .iter()
-            .map(|a| cutetts_codec::chunk::pad_tail(&cutetts_codec::chunk::trim_silence(a, 24000, 0.25), 24000, 0.15))
+            .map(|a| cutetts_codec::chunk::trim_silence(a, 24000, 0.25))
             .collect();
-        cutetts_codec::chunk::crossfade_concat(&cleaned, 720)
+        let (leveled, gains) = if has_flag(&args, "--no-level") {
+            (trimmed, vec![1.0; wavs.len()])
+        } else {
+            cutetts_codec::chunk::level_chunks(&trimmed, 24000)
+        };
+        say!(pipe, "level: gains {}", gains.iter().map(|g| format!("{g:.2}")).collect::<Vec<_>>().join(" "));
+        let padded: Vec<Vec<f32>> = leveled
+            .iter()
+            .map(|a| cutetts_codec::chunk::pad_tail(a, 24000, 0.15))
+            .collect();
+        let joined = cutetts_codec::chunk::crossfade_concat(&padded, 720);
+        cutetts_codec::chunk::peak_guard(&joined, 0.98)
     };
     if pipe {
         // offline pipe: one raw dump at the end (no wav header)

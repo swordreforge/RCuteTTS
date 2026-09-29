@@ -2,7 +2,7 @@
 //! Pure-logic, no weights. Adapted: our join pipeline is pad_tail-only
 //! (no trim_silence port — pad alone guarantees the fade zone starts
 //! from digital silence on the tail side).
-use cutetts_codec::chunk::{crossfade_concat, pad_tail, split_sentences, trim_silence};
+use cutetts_codec::chunk::{crossfade_concat, level_chunks, pad_tail, peak_guard, speech_rms, split_sentences, trim_silence};
 
 #[test]
 fn split_chinese() {
@@ -181,5 +181,44 @@ fn trim_then_pad_bounds_tail() {
     let p = pad_tail(&t, 24000, 0.15);
     let tail = p.len() - 19200;
     assert!(tail >= 3600 && tail <= 6000 + 480, "tail={tail}");
+}
+
+#[test]
+fn level_equalizes_chunks() {
+    // same content, 4x loudness apart → same speech RMS after leveling;
+    // median anchor lands on the louder chunk here
+    let a = speech(12000, 0.1);
+    let b = speech(12000, 0.4);
+    let (lv, gains) = level_chunks(&[a, b], 24000);
+    assert!((gains[1] - 1.0).abs() < 1e-6, "median anchor untouched");
+    let ra = speech_rms(&lv[0], 24000);
+    let rb = speech_rms(&lv[1], 24000);
+    assert!((ra - rb).abs() / rb < 1e-5, "{ra} vs {rb}");
+    assert!((gains[0] - 4.0).abs() < 1e-4, "clamped gain");
+}
+
+#[test]
+fn level_silence_safe() {
+    // silence-only second chunk: gain stays 1.0 (never amplify silence
+    // into noise), no NaN, content untouched
+    let a = speech(12000, 0.2);
+    let b = vec![0.0; 12000];
+    let (lv, gains) = level_chunks(&[a, b], 24000);
+    assert_eq!(gains[1], 1.0);
+    assert!(lv[1].iter().all(|v| v.is_finite()));
+    assert!(lv[1].iter().all(|&v| v == 0.0));
+}
+
+#[test]
+fn peak_guard_caps() {
+    let a = speech(12000, 2.0); // peaks > 1
+    let peak_before = a.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+    assert!(peak_before > 1.0);
+    let g = peak_guard(&a, 0.98);
+    let peak_after = g.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+    assert!((peak_after - 0.98).abs() < 1e-5);
+    // under ceiling: bit-preserving
+    let q = speech(12000, 0.2);
+    assert_eq!(peak_guard(&q, 0.98), q);
     println!("CHUNK gates passed");
 }

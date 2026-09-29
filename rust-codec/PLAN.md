@@ -138,3 +138,10 @@
 - 三个数：首包（prefill+1 步，短句 0.16s）、步进 pacing（每包 160ms 音频预算，
   实测 mean 91ms p99 108ms：含逐包 VAE，比离线 AR 纯环慢是单包无 batching 的代价）、
  整体 RTF（短句 0.60，含 prefill）。
+
+## 18. 包响度拉平（M28，本轮听感反馈：克隆"一下大一下小"）
+- 根因：每包是独立 AR 轨迹，响度天然漂移（实测 39 包增益 0.63~1.74，差 2.8 倍）；
+  官方 `_normalize_decoded_waveforms` 只是 squeeze、无响度归一，单跑盖住了问题。
+- 修：`level_chunks`（语音门限 RMS→中位数锚点，非零中位数，增益夹 [0.25,4]，
+  静音包不动）→ pad → xfade → 全局 peak 0.98；`--no-level` 可关。
+- 数：result.txt 逐秒 RMS std 0.051→0.022（-57%），max 0.33→0.18。
