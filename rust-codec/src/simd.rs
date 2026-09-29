@@ -140,6 +140,135 @@ pub fn saxpy(c: &mut [f32], b: &[f32], av: f32, n: usize) {
     run_saxpy(resolve_saxpy(), c, b, av, n)
 }
 
+// ============================================================
+// 8x8 register-blocked micro-kernel (GotoBLAS-style).
+// ============================================================
+//
+// Problem with the SAXPY loop order: every K iteration does
+// load-C + load-B + FMA + store-C on the whole C tile, i.e. the
+// tile round-trips through L1 K times (K <= 1536 here).
+// The micro-kernel instead holds an 8-row x 8-col C block in 8 ymm
+// accumulators across the FULL K loop: C traffic drops from O(K)
+// to O(1) (init from bias + single store). A streams once
+// (broadcasts), B streams once (8-wide loads).
+//
+// Layout contract (matches `pack_a`, MR=8):
+// - `ap`: one A panel, K*8 contiguous floats, row ii at `ap + ii*8`.
+// - `b`: full B matrix, K x `t_full` row-major; block cols `j0..j0+8`.
+// - `bias8`: 8 bias floats for the 8 rows.
+// - `c`: C tile row `m` starts at `c + m*c_stride`; store 8 floats at +0.
+// - Op order per lane is bias, then ii=0..K ascending — identical to
+//   the SAXPY path, so `exact` is bit-identical and `fma` differs only
+//   by single-vs-double rounding (same as before, no new error source).
+
+/// Scalar 8x8 micro-kernel (oracle + non-x86 fallback).
+/// Lane (m, j) order: bias, then ii=0..K ascending — matches the vector
+/// kernel, so `exact` must agree bitwise.
+pub fn micro_8x8_scalar(
+    ap: &[f32],
+    b: &[f32],
+    t_full: usize,
+    k: usize,
+    j0: usize,
+    bias8: &[f32; 8],
+    c: &mut [f32],
+    c_stride: usize,
+) {
+    let mut acc = [[0.0f32; 8]; 8];
+    for m in 0..8 {
+        for j in 0..8 {
+            acc[m][j] = bias8[m];
+        }
+    }
+    for ii in 0..k {
+        for m in 0..8 {
+            let a = ap[ii * 8 + m];
+            for j in 0..8 {
+                acc[m][j] += a * b[ii * t_full + j0 + j];
+            }
+        }
+    }
+    for m in 0..8 {
+        c[m * c_stride..m * c_stride + 8].copy_from_slice(&acc[m]);
+    }
+}
+
+/// Shared 8x8 body (QORA `causal_range_body` pattern): `$op(bcast, bvec, acc)`
+/// is mul+add for exact, fmadd for FMA. Accumulators stay in 8 ymm regs
+/// across the full K loop — C is touched exactly twice (bias init, store).
+#[cfg(target_arch = "x86_64")]
+macro_rules! micro8_body {
+    ($ap:expr, $b:expr, $t_full:expr, $k:expr, $j0:expr, $bias8:expr, $c:expr, $cs:expr, $op:expr) => {{
+        let mut a0 = _mm256_set1_ps((*$bias8.add(0)));
+        let mut a1 = _mm256_set1_ps((*$bias8.add(1)));
+        let mut a2 = _mm256_set1_ps((*$bias8.add(2)));
+        let mut a3 = _mm256_set1_ps((*$bias8.add(3)));
+        let mut a4 = _mm256_set1_ps((*$bias8.add(4)));
+        let mut a5 = _mm256_set1_ps((*$bias8.add(5)));
+        let mut a6 = _mm256_set1_ps((*$bias8.add(6)));
+        let mut a7 = _mm256_set1_ps((*$bias8.add(7)));
+        let combine = $op;
+        for ii in 0..$k {
+            let bv = _mm256_loadu_ps($b.add(ii * $t_full + $j0));
+            let bp = $ap.add(ii * 8);
+            a0 = combine(_mm256_broadcast_ss(&*bp.add(0)), bv, a0);
+            a1 = combine(_mm256_broadcast_ss(&*bp.add(1)), bv, a1);
+            a2 = combine(_mm256_broadcast_ss(&*bp.add(2)), bv, a2);
+            a3 = combine(_mm256_broadcast_ss(&*bp.add(3)), bv, a3);
+            a4 = combine(_mm256_broadcast_ss(&*bp.add(4)), bv, a4);
+            a5 = combine(_mm256_broadcast_ss(&*bp.add(5)), bv, a5);
+            a6 = combine(_mm256_broadcast_ss(&*bp.add(6)), bv, a6);
+            a7 = combine(_mm256_broadcast_ss(&*bp.add(7)), bv, a7);
+        }
+        _mm256_storeu_ps($c.add(0 * $cs), a0);
+        _mm256_storeu_ps($c.add(1 * $cs), a1);
+        _mm256_storeu_ps($c.add(2 * $cs), a2);
+        _mm256_storeu_ps($c.add(3 * $cs), a3);
+        _mm256_storeu_ps($c.add(4 * $cs), a4);
+        _mm256_storeu_ps($c.add(5 * $cs), a5);
+        _mm256_storeu_ps($c.add(6 * $cs), a6);
+        _mm256_storeu_ps($c.add(7 * $cs), a7);
+    }};
+}
+
+/// 8x8 micro-kernel, bit-exact vs [`micro_8x8_scalar`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn micro_8x8_exact(
+    ap: *const f32,
+    b: *const f32,
+    t_full: usize,
+    k: usize,
+    j0: usize,
+    bias8: *const f32,
+    c: *mut f32,
+    c_stride: usize,
+) {
+    micro8_body!(
+        ap, b, t_full, k, j0, bias8, c, c_stride,
+        |x: __m256, y: __m256, z: __m256| _mm256_add_ps(z, _mm256_mul_ps(x, y))
+    );
+}
+
+/// 8x8 micro-kernel, FMA (single rounding; ~1 ulp vs exact).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn micro_8x8_fma(
+    ap: *const f32,
+    b: *const f32,
+    t_full: usize,
+    k: usize,
+    j0: usize,
+    bias8: *const f32,
+    c: *mut f32,
+    c_stride: usize,
+) {
+    micro8_body!(
+        ap, b, t_full, k, j0, bias8, c, c_stride,
+        |x: __m256, y: __m256, z: __m256| _mm256_fmadd_ps(x, y, z)
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +278,61 @@ mod tests {
         *state ^= *state >> 7;
         *state ^= *state << 17;
         *state
+    }
+
+    fn rvec(st: &mut u64, n: usize, scale: f32) -> Vec<f32> {
+        (0..n).map(|_| (xrng(st) % 2000) as f32 * 0.001 * scale - scale * 0.5).collect()
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn micro_exact_matches_scalar_bitwise() {
+        if !has_avx2() {
+            eprintln!("no AVX2, skipping");
+            return;
+        }
+        let mut st = 99u64;
+        // (k, t_full, j0, c_stride): cover k < / == / > KC, strided C, j0 != 0
+        for &(k, t_full, j0, cs) in &[
+            (1usize, 8, 0, 8),
+            (7, 16, 0, 16),
+            (64, 24, 8, 24),
+            (300, 120, 40, 120),
+            (1536, 120, 0, 120),
+        ] {
+            let ap = rvec(&mut st, k * 8, 2.0);
+            let b = rvec(&mut st, k * t_full, 2.0);
+            let bias: [f32; 8] = core::array::from_fn(|_| (xrng(&mut st) % 1000) as f32 * 0.01);
+            let mut c1 = vec![9.0f32; 8 * cs];
+            let mut c2 = c1.clone();
+            micro_8x8_scalar(&ap, &b, t_full, k, j0, &bias, &mut c1, cs);
+            unsafe { micro_8x8_exact(ap.as_ptr(), b.as_ptr(), t_full, k, j0, bias.as_ptr(), c2.as_mut_ptr(), cs) };
+            assert_eq!(c1.len(), c2.len());
+            for (i, (a, b)) in c1.iter().zip(c2.iter()).enumerate() {
+                assert!(a.to_bits() == b.to_bits(), "k={k} t={t_full} j0={j0} cs={cs} [{i}]: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn micro_fma_within_tolerance() {
+        if !has_avx2_fma() {
+            eprintln!("no AVX2+FMA, skipping");
+            return;
+        }
+        let mut st = 123u64;
+        let (k, t_full, j0, cs) = (700usize, 120, 16, 120);
+        let ap = rvec(&mut st, k * 8, 2.0);
+        let b = rvec(&mut st, k * t_full, 2.0);
+        let bias: [f32; 8] = core::array::from_fn(|_| (xrng(&mut st) % 1000) as f32 * 0.01);
+        let mut c1 = vec![0.0f32; 8 * cs];
+        let mut c2 = vec![0.0f32; 8 * cs];
+        micro_8x8_scalar(&ap, &b, t_full, k, j0, &bias, &mut c1, cs);
+        unsafe { micro_8x8_fma(ap.as_ptr(), b.as_ptr(), t_full, k, j0, bias.as_ptr(), c2.as_mut_ptr(), cs) };
+        let worst = c1.iter().zip(c2.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        let scale = c1.iter().map(|v| v.abs()).fold(0.0, f32::max).max(1e-6);
+        assert!(worst / scale < 1e-6, "worst={worst:.2e} scale={scale:.2e}");
     }
 
     #[test]

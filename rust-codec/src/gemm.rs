@@ -2,8 +2,11 @@
 //!
 //! `C = A*B + bias`, A is a static weight matrix pre-packed at load
 //! (`pack_a`, MR=8 row interleave), B is row-major activations.
-//! Blocking: threads over O-panels; per thread KC=256 x NC=512 tiles;
-//! the micro-kernel is a plain contiguous FMA loop left to autovec.
+//! Compute kernel: explicit 8x8 register-blocked micro-kernel
+//! ([`crate::simd::micro_8x8_fma`] / `micro_8x8_exact`) holding C in 8 ymm
+//! accs across the full K loop — C traffic is O(1) per block instead of O(K).
+//! Remainder cols (< 8) fall back to bias-fill + SAXPY.
+//! Threading: 1D row chunks (small-T) or 2D row/time tiles (large-T).
 //! No external deps (QORA-style: hand-rolled, thread::scope).
 //! Hot inner loop uses explicit AVX2 kernels from [`crate::simd`]
 //! (runtime-dispatched, portable binary).
@@ -38,7 +41,23 @@ pub fn pack_a(a: &[f32], rows: usize, cols: usize) -> PackedA {
 /// `c` must hold `a.rows * t` floats (padded rows included).
 /// 2D task grid (row-panels x time-tiles); each task owns a disjoint
 /// ~16 x 2048 tile gathered/scattered through a contiguous temp buffer.
+/// Kernel (exact/FMA) is resolved once here and threaded through.
 pub fn sgemm_bias(a: &PackedA, b: &[f32], t: usize, bias: &[f32], c: &mut [f32], nth: usize) {
+    sgemm_bias_with_kind(a, b, t, bias, c, nth, resolve_saxpy())
+}
+
+/// [`sgemm_bias`] with an explicit kernel (tests / debugging).
+/// `SaxpyKind::{Fma, Exact}` select the 8x8 register micro-kernel;
+/// `Scalar` keeps the old triple loop.
+pub fn sgemm_bias_with_kind(
+    a: &PackedA,
+    b: &[f32],
+    t: usize,
+    bias: &[f32],
+    c: &mut [f32],
+    nth: usize,
+    kind: SaxpyKind,
+) {
     let (pr, k) = (a.rows, a.cols);
     assert_eq!(b.len(), k * t);
     assert_eq!(c.len(), pr * t);
@@ -48,7 +67,7 @@ pub fn sgemm_bias(a: &PackedA, b: &[f32], t: usize, bias: &[f32], c: &mut [f32],
     let rtasks = pr.div_ceil(ROW_STEP);
     let ctasks = t.div_ceil(COL_STEP);
     if nth <= 1 || ops < 200_000 || rtasks * ctasks <= 1 {
-        return sgemm_range(a, b, t, bias, c, t, 0, pr, 0, t);
+        return sgemm_range(a, b, t, bias, c, t, 0, pr, 0, t, kind);
     }
     // Small-T: 1D row chunks written directly (no temp tiles, no atomics).
     if ctasks == 1 {
@@ -59,7 +78,7 @@ pub fn sgemm_bias(a: &PackedA, b: &[f32], t: usize, bias: &[f32], c: &mut [f32],
                 let p0 = pi * per;
                 let p1 = (p0 + per).min(panels);
                 s.spawn(move || {
-                    sgemm_range(a, b, t, bias, chunk, t, p0 * MR, p1 * MR, 0, t);
+                    sgemm_range(a, b, t, bias, chunk, t, p0 * MR, p1 * MR, 0, t, kind);
                 });
             }
         });
@@ -97,7 +116,7 @@ pub fn sgemm_bias(a: &PackedA, b: &[f32], t: usize, bias: &[f32], c: &mut [f32],
                 let task = &tasks_ref[idx];
                 let (rn, tn) = (task.r1 - task.r0, task.t1 - task.t0);
                 let mut tile = vec![0.0f32; rn * tn];
-                sgemm_range(a, b, t, bias, &mut tile, tn, task.r0, task.r1, task.t0, task.t1);
+                sgemm_range(a, b, t, bias, &mut tile, tn, task.r0, task.r1, task.t0, task.t1, kind);
                 unsafe {
                     let base = c_ptr as *mut f32;
                     for r in 0..rn {
@@ -113,7 +132,79 @@ pub fn sgemm_bias(a: &PackedA, b: &[f32], t: usize, bias: &[f32], c: &mut [f32],
 
 /// Compute output rows `[r0, r1)` x cols `[tc0, tc1)` into `c`,
 /// a contiguous `(r1-r0)` x `(tc1-tc0)` row-major tile (`tn = tc1-tc0`).
+///
+/// Vector path (`Fma`/`Exact`): columns advance in 8-wide blocks, each
+/// `(panel, block)` computed by one [`micro_8x8`] call whose 8 accumulators
+/// stay in ymm regs across the full K loop — C traffic is O(1) per block
+/// (bias init + single store) instead of O(K). Remainder cols (< 8) fall
+/// back to bias-fill + SAXPY. `j0` (N-block) is the outer loop so a B
+/// column-slice is reused across all row-panels while L2-resident.
 fn sgemm_range(
+    a: &PackedA,
+    b: &[f32],
+    t_full: usize,
+    bias: &[f32],
+    c: &mut [f32],
+    tn: usize,
+    r0: usize,
+    r1: usize,
+    tc0: usize,
+    tc1: usize,
+    kind: SaxpyKind,
+) {
+    let k = a.cols;
+    if kind == SaxpyKind::Scalar {
+        return sgemm_range_scalar(a, b, t_full, bias, c, tn, r0, r1, tc0, tc1);
+    }
+    let tcols = tc1 - tc0;
+    let n_full = tcols / MR * MR;
+    for j in (0..n_full).step_by(MR) {
+        let jabs = tc0 + j;
+        for p in (r0 / MR)..(r1 / MR) {
+            let mut bb = [0.0f32; MR];
+            for m in 0..MR {
+                bb[m] = bias.get(p * MR + m).copied().unwrap_or(0.0);
+            }
+            let ap = &a.data[p * k * MR..p * k * MR + k * MR];
+            let crow = &mut c[(p * MR - r0) * tn + j..];
+            // SAFETY: ap holds exactly k*8 floats; crow has >= 8 cols
+            // remaining in this row (j + 8 <= tn by loop bound).
+            unsafe {
+                match kind {
+                    SaxpyKind::Fma => crate::simd::micro_8x8_fma(
+                        ap.as_ptr(), b.as_ptr(), t_full, k, jabs,
+                        bb.as_ptr(), crow.as_mut_ptr(), tn,
+                    ),
+                    _ => crate::simd::micro_8x8_exact(
+                        ap.as_ptr(), b.as_ptr(), t_full, k, jabs,
+                        bb.as_ptr(), crow.as_mut_ptr(), tn,
+                    ),
+                }
+            }
+        }
+    }
+    // Tail cols (< 8): bias fill + K-loop SAXPY (same as the old path).
+    if n_full < tcols {
+        let ker = kind;
+        for p in (r0 / MR)..(r1 / MR) {
+            for m in 0..MR {
+                let bs = bias.get(p * MR + m).copied().unwrap_or(0.0);
+                let row = &mut c[(p * MR - r0) * tn + m * tn + n_full
+                    ..(p * MR - r0) * tn + (m + 1) * tn];
+                row.fill(bs);
+                for ii in 0..k {
+                    let av = a.data[(p * k + ii) * MR + m];
+                    let brow = &b[ii * t_full + tc0 + n_full..ii * t_full + tc1];
+                    run_saxpy(ker, row, brow, av, tcols - n_full);
+                }
+            }
+        }
+    }
+}
+
+/// Scalar fallback for [`sgemm_range`] (non-x86 / no AVX2): the original
+/// bias-fill + K-loop SAXPY nest.
+fn sgemm_range_scalar(
     a: &PackedA,
     b: &[f32],
     t_full: usize,
@@ -126,10 +217,7 @@ fn sgemm_range(
     tc1: usize,
 ) {
     let k = a.cols;
-    // Hoisted kernel: resolving once per tile avoids ~100ns env::var
-    // per inner-loop call (tens of millions of calls per decode).
-    let ker: SaxpyKind = resolve_saxpy();
-    // init tile with bias (branch-free hot loop below)
+    let ker = SaxpyKind::Scalar;
     for p in (r0 / MR)..(r1 / MR) {
         for m in 0..MR {
             let bs = bias.get(p * MR + m).copied().unwrap_or(0.0);
