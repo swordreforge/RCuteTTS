@@ -167,25 +167,31 @@ const ATTN_SCALE: f32 = 1.0 / 8.0; // 1/sqrt(64)
 
 /// Linear on row-major `[S, I]` -> `[S, O]`. Pads S to 8 cols so the
 /// 8x8 micro-kernel fires; big MLP linears thread, tiny ones stay serial.
+/// Linear on row-major `[S, I]` -> `[S, O]` in a SINGLE sgemm call
+/// (sgemm tiles N internally; the old 8-row chunking spawned 22 threads
+/// per chunk — hundreds of spawns per prefill, all overhead).
+/// S < 8 pads columns to 8 so the 8x8 micro-kernel still fires (DiT S=5);
+/// S >= 8 runs direct (micro blocks + scalar tail inside sgemm).
+/// Big linears (>= 8M ops) thread, tiny ones stay serial.
 pub(crate) fn linear_rows(x: &[f32], s: usize, l: &DitLinear, nth: usize) -> Vec<f32> {
     let i = l.w.cols;
     let o = l.out_dim;
     assert_eq!(x.len(), s * i);
-    assert!(s <= 8, "linear_rows handles at most 8 rows (DiT S<=5); use chunking for more");
     const T: usize = 8;
-    let mut xb = vec![0.0f32; i * T];
+    let t = if s < T { T } else { s };
+    let mut xb = vec![0.0f32; i * t];
     for ii in 0..i {
         for ss in 0..s {
-            xb[ii * T + ss] = x[ss * i + ii];
+            xb[ii * t + ss] = x[ss * i + ii];
         }
     }
     let ln = if (o as u64) * (i as u64) * (s as u64) >= 8_000_000 { nth } else { 1 };
-    let mut c = vec![0.0f32; l.w.rows * T];
-    sgemm_bias(&l.w, &xb, T, &l.b, &mut c, ln);
+    let mut c = vec![0.0f32; l.w.rows * t];
+    sgemm_bias(&l.w, &xb, t, &l.b, &mut c, ln);
     let mut out = vec![0.0f32; s * o];
     for ss in 0..s {
         for oo in 0..o {
-            out[ss * o + oo] = c[oo * T + ss];
+            out[ss * o + oo] = c[oo * t + ss];
         }
     }
     out
@@ -201,7 +207,7 @@ pub(crate) fn rms_norm_row(x: &[f32], w: &[f32]) -> Vec<f32> {
     x.iter().zip(w.iter()).map(|(&a, &b)| a * inv * b).collect()
 }
 
-fn silu_vec(x: &[f32]) -> Vec<f32> {
+pub(crate) fn silu_vec(x: &[f32]) -> Vec<f32> {
     x.iter().map(|&v| v / (1.0 + (-v).exp())).collect()
 }
 

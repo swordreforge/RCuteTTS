@@ -318,6 +318,74 @@ pub fn bf16_to_f32(dst: &mut [f32], src: &[u16]) {
     bf16_to_f32_scalar(dst, src)
 }
 
+// ============================================================
+// GEMV over packed panels (Qwen3 decode path, T=1).
+// ============================================================
+//
+// sgemm pads N to 8 cols — at T=1 that wastes 8x compute. GEMV instead
+// vectorizes over ROWS: one panel (8 rows x K) produces 8 outputs with
+// accumulators in a single ymm, no horizontal reduction:
+// per k: 1 A-col load + 1 x-broadcast + 1 FMA = 8 MACs.
+// Layout matches pack_a: panel p, col k at ap + k*8.
+// Op order per row (bias, k ascending) == scalar loop => exact is bitwise.
+
+/// Scalar GEMV oracle over one 8-row panel.
+pub fn gemv8_scalar(ap: &[f32], x: &[f32], k: usize, bias8: &[f32; 8], y: &mut [f32]) {
+    assert!(ap.len() >= k * 8 && x.len() >= k && y.len() >= 8);
+    for m in 0..8 {
+        let mut acc = bias8[m];
+        for ii in 0..k {
+            acc += ap[ii * 8 + m] * x[ii];
+        }
+        y[m] = acc;
+    }
+}
+
+/// GEMV panel, bit-exact vs [`gemv8_scalar`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn gemv8_exact(ap: *const f32, x: *const f32, k: usize, bias8: *const f32, y: *mut f32) {
+    let mut acc = _mm256_loadu_ps(bias8);
+    for ii in 0..k {
+        let av = _mm256_loadu_ps(ap.add(ii * 8));
+        let xv = _mm256_broadcast_ss(&*x.add(ii));
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(av, xv));
+    }
+    _mm256_storeu_ps(y, acc);
+}
+
+/// GEMV panel, FMA (single rounding).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn gemv8_fma(ap: *const f32, x: *const f32, k: usize, bias8: *const f32, y: *mut f32) {
+    let mut acc = _mm256_loadu_ps(bias8);
+    for ii in 0..k {
+        let av = _mm256_loadu_ps(ap.add(ii * 8));
+        let xv = _mm256_broadcast_ss(&*x.add(ii));
+        acc = _mm256_fmadd_ps(av, xv, acc);
+    }
+    _mm256_storeu_ps(y, acc);
+}
+
+/// Dispatched GEMV panel (hot-loop entry: caller hoists [`SaxpyKind`]).
+#[inline]
+pub fn run_gemv8(kind: SaxpyKind, ap: &[f32], x: &[f32], k: usize, bias8: &[f32; 8], y: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        match kind {
+            SaxpyKind::Fma => gemv8_fma(ap.as_ptr(), x.as_ptr(), k, bias8.as_ptr(), y.as_mut_ptr()),
+            SaxpyKind::Exact => gemv8_exact(ap.as_ptr(), x.as_ptr(), k, bias8.as_ptr(), y.as_mut_ptr()),
+            SaxpyKind::Scalar => gemv8_scalar(ap, x, k, bias8, y),
+        }
+        return;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = kind;
+        gemv8_scalar(ap, x, k, bias8, y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,8 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn bf16_to_f32_bitwise() {
-        // bit-preserving: f32_bits == (bf16_bits as u32) << 16 for ALL patterns
+    fn bf16_to_f32_bitwise() {        // bit-preserving: f32_bits == (bf16_bits as u32) << 16 for ALL patterns
         // (normals, subnormals, zeros, inf, nan) — no tolerance needed.
         let mut st = 555u64;
         // exhaustive lows + random + specials
@@ -462,6 +529,51 @@ mod tests {
             }
             let h = half::bf16::from_bits(s).to_f32().to_bits();
             assert_eq!(h, (s as u32) << 16, "half crate disagrees on {s:#06x}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn gemv8_exact_matches_scalar_bitwise() {
+        if !has_avx2() {
+            eprintln!("no AVX2, skipping");
+            return;
+        }
+        let mut st = 2024u64;
+        for &k in &[1usize, 7, 64, 256, 1024, 1536] {
+            let ap: Vec<f32> = (0..k * 8).map(|_| (xrng(&mut st) % 2000) as f32 * 0.002 - 2.0).collect();
+            let x: Vec<f32> = (0..k).map(|_| (xrng(&mut st) % 2000) as f32 * 0.002 - 2.0).collect();
+            let bias: [f32; 8] = core::array::from_fn(|_| (xrng(&mut st) % 1000) as f32 * 0.01);
+            let mut y1 = [0.0f32; 8];
+            let mut y2 = [0.0f32; 8];
+            gemv8_scalar(&ap, &x, k, &bias, &mut y1);
+            unsafe { gemv8_exact(ap.as_ptr(), x.as_ptr(), k, bias.as_ptr(), y2.as_mut_ptr()) };
+            for m in 0..8 {
+                assert!(y1[m].to_bits() == y2[m].to_bits(), "k={k} [{m}]: {} vs {}", y1[m], y2[m]);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn gemv8_fma_within_tolerance() {
+        if !has_avx2_fma() {
+            eprintln!("no AVX2+FMA, skipping");
+            return;
+        }
+        let mut st = 777u64;
+        let k = 1024;
+        let ap: Vec<f32> = (0..k * 8).map(|_| (xrng(&mut st) % 2000) as f32 * 0.002 - 2.0).collect();
+        let x: Vec<f32> = (0..k).map(|_| (xrng(&mut st) % 2000) as f32 * 0.002 - 2.0).collect();
+        let bias: [f32; 8] = core::array::from_fn(|_| (xrng(&mut st) % 1000) as f32 * 0.01);
+        let mut y1 = [0.0f32; 8];
+        let mut y2 = [0.0f32; 8];
+        gemv8_scalar(&ap, &x, k, &bias, &mut y1);
+        unsafe { gemv8_fma(ap.as_ptr(), x.as_ptr(), k, bias.as_ptr(), y2.as_mut_ptr()) };
+        for m in 0..8 {
+            // K-accumulated FMA drift (~K/2 ulps); gate documents it.
+            let rel = (y1[m] - y2[m]).abs() / y1[m].abs().max(1e-3);
+            assert!(rel < 5e-6, "[{m}]: {} vs {} rel={rel}", y1[m], y2[m]);
         }
     }
 }

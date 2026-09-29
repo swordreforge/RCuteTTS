@@ -254,28 +254,26 @@ pub fn locenc_embed(w: &LocencW, x: &[f32], b: usize, t: usize, nth: usize) -> V
     linear_rows(&cls, b * t, &w.proj, nth)
 }
 
-/// [`linear_rows`] over a pre-packed weight, chunked to ≤8 rows per
-/// micro-kernel block (LocEnc prefill can feed hundreds of rows).
+/// [`linear_rows`](crate::dit::linear_rows) over a pre-packed weight:
+/// single sgemm call (see note there about chunking vs spawns).
 fn linear_rows_in(x: &[f32], s: usize, w: &crate::gemm::PackedA, b: &[f32], o: usize, nth: usize) -> Vec<f32> {
     let i = w.cols;
     assert_eq!(x.len(), s * i);
     const T: usize = 8;
-    let mut out = vec![0.0f32; s * o];
-    for sb in (0..s).step_by(T) {
-        let sn = (sb + T).min(s) - sb;
-        let mut xb = vec![0.0f32; i * T];
-        for ii in 0..i {
-            for ss in 0..sn {
-                xb[ii * T + ss] = x[(sb + ss) * i + ii];
-            }
+    let t = if s < T { T } else { s };
+    let mut xb = vec![0.0f32; i * t];
+    for ii in 0..i {
+        for ss in 0..s {
+            xb[ii * t + ss] = x[ss * i + ii];
         }
-        let ln = if (o as u64) * (i as u64) * (sn as u64) >= 8_000_000 { nth } else { 1 };
-        let mut c = vec![0.0f32; w.rows * T];
-        crate::gemm::sgemm_bias(w, &xb, T, b, &mut c, ln);
-        for ss in 0..sn {
-            for oo in 0..o {
-                out[(sb + ss) * o + oo] = c[oo * T + ss];
-            }
+    }
+    let ln = if (o as u64) * (i as u64) * (s as u64) >= 8_000_000 { nth } else { 1 };
+    let mut c = vec![0.0f32; w.rows * t];
+    crate::gemm::sgemm_bias(w, &xb, t, b, &mut c, ln);
+    let mut out = vec![0.0f32; s * o];
+    for ss in 0..s {
+        for oo in 0..o {
+            out[ss * o + oo] = c[oo * t + ss];
         }
     }
     out
