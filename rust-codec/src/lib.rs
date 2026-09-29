@@ -10,5 +10,6 @@ pub mod pool;
 pub mod qwen;
 pub mod simd;
 pub mod speaker;
+pub mod stream;
 pub mod snake;
 pub mod weights;

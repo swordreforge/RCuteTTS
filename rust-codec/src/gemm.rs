@@ -62,6 +62,12 @@ pub fn sgemm_bias_with_kind(
     assert_eq!(b.len(), k * t);
     assert_eq!(c.len(), pr * t);
     let ops = pr as u64 * t as u64 * k as u64;
+    // Small-T (streaming chunks, SE blocks): the 8-wide micro-kernel never
+    // fires below 8 columns (all scalar tail). Route to panel-GEMV instead:
+    // vectorize over ROWS via run_gemv8 (no N-width requirement), bias once.
+    if t < 8 && kind != SaxpyKind::Scalar {
+        return sgemm_small_t(a, b, t, bias, c, nth, kind);
+    }
     const ROW_STEP: usize = 2 * MR;
     const COL_STEP: usize = 2048;
     let rtasks = pr.div_ceil(ROW_STEP);
@@ -136,10 +142,88 @@ pub fn sgemm_bias_with_kind(
     crate::pool::scope(jobs);
 }
 
+/// Small-T GEMM (t < 8) via panel GEMV: C[o, j] = A[o,:] x B[:,j] + bias.
+/// Same math as the micro path (bias folded once, j=0); bitwise-identical
+/// across thread counts (disjoint panels). Used by streaming chunks (T=2..7)
+/// and t=1 linears (SE blocks), where the 8-wide kernel cannot fire.
+fn sgemm_small_t(
+    a: &PackedA,
+    b: &[f32],
+    t: usize,
+    bias: &[f32],
+    c: &mut [f32],
+    nth: usize,
+    kind: SaxpyKind,
+) {
+    use crate::simd::run_gemv8;
+    let (pr, k) = (a.rows, a.cols);
+    let panels = pr / MR;
+    // gemv8 over one panel; B column gathered once per col, bias folded at j=0.
+    fn panel_col(
+        a: &PackedA,
+        b: &[f32],
+        t: usize,
+        k: usize,
+        bias: &[f32],
+        kind: SaxpyKind,
+        p: usize,
+        j: usize,
+        bcol: &[f32],
+        out8: &mut [f32],
+    ) {
+        let mut bb = [0.0f32; MR];
+        for m in 0..MR {
+            bb[m] = bias.get(p * MR + m).copied().unwrap_or(0.0);
+        }
+        run_gemv8(kind, &a.data[p * k * MR..(p + 1) * k * MR], bcol, k, &bb, out8);
+    }
+    let ops = pr as u64 * t as u64 * k as u64;
+    if nth <= 1 || panels <= 1 || ops < 200_000 {
+        let mut bcol = vec![0.0f32; k];
+        let mut tmp = [0.0f32; MR];
+        for j in 0..t {
+            for ii in 0..k {
+                bcol[ii] = b[ii * t + j];
+            }
+            for p in 0..panels {
+                panel_col(a, b, t, k, bias, kind, p, j, &bcol, &mut tmp);
+                for m in 0..MR {
+                    c[(p * MR + m) * t + j] = tmp[m];
+                }
+            }
+        }
+        return;
+    }
+    // threaded over panels; each job owns whole panel rows (all cols)
+    let per = (panels + nth - 1) / nth;
+    let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = c
+        .chunks_mut(per * MR * t)
+        .enumerate()
+        .map(|(pi, chunk)| {
+            let p0 = pi * per;
+            let p1 = (p0 + per).min(panels);
+            Box::new(move || {
+                let mut bcol = vec![0.0f32; k];
+                let mut tmp = [0.0f32; MR];
+                for j in 0..t {
+                    for ii in 0..k {
+                        bcol[ii] = b[ii * t + j];
+                    }
+                    for p in p0..p1 {
+                        panel_col(a, b, t, k, bias, kind, p, j, &bcol, &mut tmp);
+                        for m in 0..MR {
+                            chunk[(p - p0) * MR * t + m * t + j] = tmp[m];
+                        }
+                    }
+                }
+            }) as Box<dyn FnOnce() + Send + '_>
+        })
+        .collect();
+    crate::pool::scope(jobs);
+}
+
 /// Compute output rows `[r0, r1)` x cols `[tc0, tc1)` into `c`,
 /// a contiguous `(r1-r0)` x `(tc1-tc0)` row-major tile (`tn = tc1-tc0`).
-///
-/// Vector path (`Fma`/`Exact`): columns advance in 8-wide blocks, each
 /// `(panel, block)` computed by one [`micro_8x8`] call whose 8 accumulators
 /// stay in ymm regs across the full K loop — C traffic is O(1) per block
 /// (bias init + single store) instead of O(K). Remainder cols (< 8) fall
@@ -270,7 +354,7 @@ mod tests {
                 for i in 0..4 {
                     e += a[o * 4 + i] * b[i * 5 + tt];
                 }
-                assert!((c[o * 5 + tt] - e).abs() < 1e-5, "{o},{tt}");
+                assert!((c[o * 5 + tt] - e).abs() < 1e-5, "{o},{tt}: got {} want {e}", c[o * 5 + tt]);
             }
         }
     }

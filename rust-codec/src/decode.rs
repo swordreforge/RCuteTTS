@@ -26,15 +26,17 @@ macro_rules! pt {
 use crate::snake::snake1d_nth as snake1d_par;
 use crate::weights::DecoderW;
 
-const RES_DILATION: [usize; 3] = [1, 3, 9];
-const RES_PAD: [usize; 3] = [3, 9, 27];
+pub(crate) const RES_DILATION: [usize; 3] = [1, 3, 9];
+pub(crate) const RES_PAD: [usize; 3] = [3, 9, 27];
 
-fn cv(x: &[f32], c_in: usize, t: usize, w: &[f32], b: &[f32], c_out: usize, k: usize,
+pub(crate) fn cv(x: &[f32], c_in: usize, t: usize, w: &[f32], b: &[f32], c_out: usize, k: usize,
       d: usize, g: usize, p: usize, nth: usize) -> Vec<f32> {
     causal_conv1d_par(x, c_in, t, w, b, c_out, k, d, g, p, nth)
 }
 
-fn tc(x: &[f32], t: usize, st: &crate::weights::StageW, nth: usize) -> Vec<f32> {
+/// Full transposed-conv + interleave over T inputs (no slicing).
+/// Streaming reuses this on [history ++ chunk] and slices rows [s..].
+pub(crate) fn transpose_full(x: &[f32], t: usize, st: &crate::weights::StageW, nth: usize) -> Vec<f32> {
     // Transpose k=2s exact decomposition:
     // out[o, i*s+j] = Y0[j][o,i] + (i>0 ? Y1[j][o,i-1] : 0), bias folded into Y0.
     // Y = trans_gemm @ x, rows [M0_0..M0_{s-1}, M1_0..M1_{s-1}].
@@ -77,7 +79,7 @@ fn interleave_range(y: &[f32], out: &mut [f32], o: usize, t: usize, s: usize, o0
     }
 }
 
-fn pw1(x: &[f32], t: usize, g: &crate::gemm::PackedA, b: &[f32], o: usize, nth: usize) -> Vec<f32> {
+pub(crate) fn pw1(x: &[f32], t: usize, g: &crate::gemm::PackedA, b: &[f32], o: usize, nth: usize) -> Vec<f32> {
     let mut c = vec![0.0f32; g.rows * t];
     sgemm_bias(g, x, t, b, &mut c, nth);
     c.truncate(o * t);
@@ -103,7 +105,7 @@ pub fn decode_nth(w: &DecoderW, latent: &[f32], frames: usize, nth: usize) -> Ve
         pt!(prof, Instant::now(), format!("s{si}_snake0"), {
             snake1d_par(&mut h, ch, t, &st.alpha, nth)
         });
-        h = pt!(prof, Instant::now(), format!("s{si}_trans"), { tc(&h, t, st, nth) });
+        h = pt!(prof, Instant::now(), format!("s{si}_trans"), { transpose_full(&h, t, st, nth) });
         t *= st.stride;
         ch = st.out_c;
         for (ri, ru) in st.res.iter().enumerate() {
