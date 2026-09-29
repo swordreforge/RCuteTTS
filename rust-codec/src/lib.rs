@@ -1,3 +1,4 @@
+pub mod chunk;
 pub mod conv;
 pub mod decode;
 pub mod decoder;

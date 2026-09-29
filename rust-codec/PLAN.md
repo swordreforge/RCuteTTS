@@ -103,3 +103,9 @@
 ## 12. Clone CLI（M22，本轮）
 
 `cutetts --mode voice_clone`：hound 读 wav → mono → 30s 截断 → reference/speaker 双分支（整段重复补 2s，顺序与 torch 一致：先截断再 resample）→ ECAPA + VAE-enc + `clone_prefix`（5 段融合，speaker slot 经 lm_speaker_linear）→ 同 AR 环（spk=Some）→ wav。`tests/prefix.rs`：piece 精确、ref feats 5.5e-5、文本行按位、speech 行 4.7e-2（bf16 地板）。实测：13 步 2.08s，总 ~4s（weights 1.4 + reference 1.8 + prefill 0.18 + AR 0.6 + VAE 0.2）。虚惊：prefill T=65 显示 3.4s——计时点框错（含 weights+reference），真值 0.13s。
+
+## 13. 长文本分包（M23，本轮）
+- 定性：小 distill LM 吃不下 1000+ token prefix——官方 torch 同文本同 seed 跑出 120s（750 步顶满），后半同样变外语；非 port bug（T=1296 teacher-forced prefill maxerr 4.42e-4，地板）。
+- 对照：better-tail-HNR.wav（QORA 1.7B）277.6s ≈ 6 字/s 正常语速；我们单 prefix 36.6s ≈ 46 字/s 且跳段。
+- 做法：移植 QORA `chunk.rs`（split_sentences 中英标点+小数/Mr. 守卫+150 字硬切，pad_tail 0.15s，crossfade 720=30ms）→ `src/chunk.rs`；CLI `--text-file` 多句自动分包，chunk seed=base+idx，单句路径无 pad 保持 bit-identical（--seed 12345 replay 验证）。
+- 门：`tests/chunk.rs` 14 项（含 result.txt 真实文本无损切分）；result.txt→39 chunks/1618 步/263s（RTF~0.44），与 277s 参考同量级。

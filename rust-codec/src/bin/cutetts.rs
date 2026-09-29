@@ -15,8 +15,9 @@
 use cutetts_codec::conv::default_threads;
 use cutetts_codec::decode::decode_nth;
 use cutetts_codec::dit::euler_sample;
-use cutetts_codec::e2e::{load_all, stop_logits};
-use cutetts_codec::locenc::locenc_embed;
+use cutetts_codec::e2e::{load_all, stop_logits, AllW};
+use cutetts_codec::locenc::{locenc_embed, LocencW};
+use cutetts_codec::prefix::PrefixW;
 use cutetts_codec::qwen::{decode_step, embed_lookup, prefill, QwenCache};
 use cutetts_codec::tok::PromptTokenizer;
 use std::path::PathBuf;
@@ -66,7 +67,9 @@ options:
   --mode tts|voice_clone   default tts (clone needs --reference-audio)
   --reference-audio PATH   reference wav for voice_clone (any PCM/mono-stereo/rate)
   --text TEXT              text to speak (mutually exclusive with --text-file)
-  --text-file PATH         read text from file (trailing newline trimmed)
+  --text-file PATH         read text from file (trailing newline trimmed;
+                         long text auto-splits into sentence chunks, 30ms
+                         crossfade join; chunk seeds = base+idx)
   --output PATH            output wav (16-bit mono 24kHz, overwritten)
   --seed N                 u64 seed; default = random each run (printed, reuse to replay)
   --max-steps N            default 750 (each step = 2 latent frames = 0.16s)
@@ -170,6 +173,87 @@ fn write_wav_16(path: &std::path::Path, samples: &[f32], sample_rate: u32) {    
     std::fs::write(path, data).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
+/// Precomputed voice_clone reference state (built once, reused per chunk).
+struct CloneCtx {
+    spk: Vec<f32>,
+    feats: Vec<f32>,
+    nf: usize,
+    lw: LocencW,
+    pw: PrefixW,
+}
+
+/// Synthesize one text piece -> mono 24k samples. Returns (wav, steps).
+/// `chunk_seed` is the effective seed for this piece (caller derives
+/// base+idx for multi-chunk runs so replays are deterministic).
+fn synth_one(
+    w: &AllW,
+    tok: &PromptTokenizer,
+    text: &str,
+    chunk_seed: u64,
+    max_steps: usize,
+    nth: usize,
+    clone: Option<&CloneCtx>,
+) -> (Vec<f32>, usize) {
+    // Prefix. tts: text only; clone: full reference chain.
+    let (prefix, tpre, spk_opt): (Vec<f32>, usize, Option<Vec<f32>>) = match clone {
+        None => {
+            let ids = tok.encode_tts(text);
+            let t = ids.len();
+            (embed_lookup(&w.qwen, &ids), t, None)
+        }
+        Some(cx) => {
+            let (embeds, t) = cutetts_codec::prefix::clone_prefix(
+                tok, &w.qwen, &cx.lw, &cx.pw, text, &cx.feats, cx.nf, &cx.spk,
+                w.e2e.scale, w.e2e.bias, nth,
+            );
+            (embeds, t, Some(cx.spk.clone()))
+        }
+    };
+    let mut cache = QwenCache::empty();
+    let h = prefill(&w.qwen, &prefix, tpre, 0, &mut cache, nth);
+    let mut last = h[(tpre - 1) * 1024..tpre * 1024].to_vec();
+
+    let mut rng = Rng(effective_seed(chunk_seed));
+    let mut cond = vec![0.0f32; 128]; // initial previous cond = zeros [1,2,64]
+    let mut latents: Vec<f32> = Vec::new();
+    let mut steps = 0;
+    loop {
+        if steps >= max_steps {
+            eprintln!("hit max steps {max_steps}");
+            break;
+        }
+        let x0 = rng.normals(128);
+        debug_assert!(x0.iter().all(|v| v.is_finite()), "x0 must be finite");
+        let sl = stop_logits(&w.e2e, &last);
+        if sl[1] > sl[0] {
+            break;
+        }
+        let (pred, scaled) = {
+            let p = euler_sample(&w.dit, &x0, &last, &cond, spk_opt.as_deref(), 4, 2.0, nth);
+            let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
+            (p, s)
+        };
+        // next cond = UNSCALED pred ([2,64] flat, as returned).
+        // Feedback MUST be RAW pred too (generation.py:1022 uses pred_latent,
+        // not pred_latent_scaled; scaled compounds every step).
+        let fb = locenc_embed(&w.locenc, &pred, 1, 1, nth);
+        cond = pred;
+        latents.extend_from_slice(&scaled);
+        last = decode_step(&w.qwen, &fb, tpre + steps, &mut cache);
+        steps += 1;
+    }
+
+    let nframes = steps * 2;
+    let mut frames = vec![0.0f32; 64 * nframes];
+    for t in 0..nframes {
+        for c in 0..64 {
+            frames[c * nframes + t] = latents[t * 64 + c];
+        }
+    }
+    let wav = decode_nth(&w.vae, &frames, nframes, nth);
+    (wav, steps)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if has_flag(&args, "--help") || has_flag(&args, "-h") || args.len() < 2 {
@@ -181,6 +265,7 @@ fn main() {
     }
     let text_opt = arg_val(&args, "--text");
     let text_file_opt = arg_val(&args, "--text-file");
+    let from_file = text_file_opt.is_some();
     let text = match (text_opt, text_file_opt) {
         (Some(_), Some(_)) => err("--text and --text-file are mutually exclusive"),
         (None, None) => usage(),
@@ -249,13 +334,10 @@ fn main() {
     );
     println!("weights loaded in {:.1}s", t0.elapsed().as_secs_f32());
 
-    // Prefix + optional speaker. tts: text only; clone: full reference chain.
+    // Reference state once (clone) — reused by every chunk.
     // (mode / ref_opt validated above.)
-    let (prefix, tpre, spk_opt): (Vec<f32>, usize, Option<Vec<f32>>) = if mode == "tts" {
-        let ids = tok.encode_tts(&text);
-        println!("tokenized: {} ids", ids.len());
-        let t = ids.len();
-        (embed_lookup(&w.qwen, &ids), t, None)
+    let clone_ctx: Option<CloneCtx> = if mode == "tts" {
+        None
     } else {
         let ref_path = ref_opt.clone().unwrap();
         let t1 = Instant::now();
@@ -286,64 +368,51 @@ fn main() {
             nf,
             t1.elapsed().as_secs_f32()
         );
-        let (embeds, t) = cutetts_codec::prefix::clone_prefix(
-            &tok, &w.qwen, &lw, &pw, &text, &feats, nf, &spk,
-            w.e2e.scale, w.e2e.bias, nth,
-        );
-        (embeds, t, Some(spk))
+        Some(CloneCtx { spk, feats, nf, lw, pw })
     };
-    let mut cache = QwenCache::empty();
-    let t0 = Instant::now();
-    let h = prefill(&w.qwen, &prefix, tpre, 0, &mut cache, nth);
-    let mut last = h[(tpre - 1) * 1024..tpre * 1024].to_vec();
-    println!("prefill T={tpre}: {:.2}s", t0.elapsed().as_secs_f32());
 
-    let mut rng = Rng(effective_seed(seed));
-    let mut cond = vec![0.0f32; 128]; // initial previous cond = zeros [1,2,64]
-    let mut latents: Vec<f32> = Vec::new();
-    let mut steps = 0;
+    // Long-text chunking (QORA-style): --text-file splits into sentences so
+    // each piece stays in-distribution for the small LM (a 1000+ token
+    // prefix wanders even in official torch). --text stays single-shot.
+    // Chunk seeds = base+idx, deterministic for replay.
+    let pieces: Vec<String> = if from_file {
+        let v = cutetts_codec::chunk::split_sentences(&text);
+        if v.len() > 1 {
+            println!("text-file: {} chunks", v.len());
+            v
+        } else {
+            vec![text]
+        }
+    } else {
+        vec![text]
+    };
     let t0 = Instant::now();
-    loop {
-        if steps >= max_steps {
-            eprintln!("hit max steps {max_steps}");
-            break;
+    let mut wavs: Vec<Vec<f32>> = Vec::with_capacity(pieces.len());
+    let mut total_steps = 0;
+    for (idx, piece) in pieces.iter().enumerate() {
+        let cs = seed.wrapping_add(idx as u64);
+        if pieces.len() > 1 {
+            println!("--- chunk {}/{} ({} chars, seed={cs}) ---", idx + 1, pieces.len(), piece.chars().count());
         }
-        let x0 = rng.normals(128);
-        debug_assert!(x0.iter().all(|v| v.is_finite()), "x0 must be finite");
-        let sl = stop_logits(&w.e2e, &last);
-        if sl[1] > sl[0] {
-            break;
-        }
-        let (pred, scaled) = {
-            let p = euler_sample(&w.dit, &x0, &last, &cond, spk_opt.as_deref(), 4, 2.0, nth);
-            let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
-            (p, s)
-        };
-        // next cond = UNSCALED pred ([2,64] flat, as returned).
-        // Feedback MUST be RAW pred too (generation.py:1022 uses pred_latent,
-        // not pred_latent_scaled; scaled compounds every step).
-        let fb = locenc_embed(&w.locenc, &pred, 1, 1, nth);
-        cond = pred;
-        latents.extend_from_slice(&scaled);
-        last = decode_step(&w.qwen, &fb, tpre + steps, &mut cache);
-        steps += 1;
+        let t1 = Instant::now();
+        let (wav, steps) = synth_one(&w, &tok, piece, cs, max_steps, nth, clone_ctx.as_ref());
+        println!("chunk {}: {steps} steps, {:.2}s audio ({:.2}s)", idx + 1, wav.len() as f32 / 24000.0, t1.elapsed().as_secs_f32());
+        total_steps += steps;
+        wavs.push(wav);
     }
-    let dt_ar = t0.elapsed().as_secs_f32();
-    println!("AR loop: {steps} steps in {dt_ar:.1}s ({:.1}ms/step)", dt_ar * 1000.0 / steps.max(1) as f32);
-
-    let nframes = steps * 2;
-    let mut frames = vec![0.0f32; 64 * nframes];
-    for t in 0..nframes {
-        for c in 0..64 {
-            frames[c * nframes + t] = latents[t * 64 + c];
-        }
-    }
-    let t0 = Instant::now();
-    let wav = decode_nth(&w.vae, &frames, nframes, nth);
-    println!("vae decode: {:.2}s", t0.elapsed().as_secs_f32());
+    // Seam hygiene (QORA): per-chunk 0.15s tail pad, then 30ms crossfade.
+    // Single piece: write as-is (no pad — bit-identical to old behavior).
+    let wav: Vec<f32> = if wavs.len() == 1 {
+        wavs.pop().unwrap()
+    } else {
+        let padded: Vec<Vec<f32>> =
+            wavs.iter().map(|a| cutetts_codec::chunk::pad_tail(a, 24000, 0.15)).collect();
+        cutetts_codec::chunk::crossfade_concat(&padded, 720)
+    };
+    println!("total: {total_steps} steps in {:.1}s", t0.elapsed().as_secs_f32());
     write_wav_16(PathBuf::from(&out).as_path(), &wav, 24000);
     let dur = wav.len() as f32 / 24000.0;
-    println!("wrote {out} ({dur:.2}s audio, seed={seed})");
+    println!("wrote {out} ({dur:.2}s audio, seed={seed}, chunks={})", pieces.len());
 }
 
 #[cfg(test)]
