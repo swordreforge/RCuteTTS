@@ -1,0 +1,886 @@
+{
+ "encoder.block.0.bias": {
+  "shape": [
+   128
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.0.weight_g": {
+  "shape": [
+   128,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.0.weight_v": {
+  "shape": [
+   128,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.0.block.0.alpha": {
+  "shape": [
+   1,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.0.block.1.bias": {
+  "shape": [
+   128
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.0.block.1.weight_g": {
+  "shape": [
+   128,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.0.block.1.weight_v": {
+  "shape": [
+   128,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.0.block.2.alpha": {
+  "shape": [
+   1,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.0.block.3.bias": {
+  "shape": [
+   128
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.0.block.3.weight_g": {
+  "shape": [
+   128,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.0.block.3.weight_v": {
+  "shape": [
+   128,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.1.block.0.alpha": {
+  "shape": [
+   1,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.1.block.1.bias": {
+  "shape": [
+   128
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.1.block.1.weight_g": {
+  "shape": [
+   128,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.1.block.1.weight_v": {
+  "shape": [
+   128,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.1.block.2.alpha": {
+  "shape": [
+   1,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.1.block.3.bias": {
+  "shape": [
+   128
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.1.block.3.weight_g": {
+  "shape": [
+   128,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.1.block.3.weight_v": {
+  "shape": [
+   128,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.2.block.0.alpha": {
+  "shape": [
+   1,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.2.block.1.bias": {
+  "shape": [
+   128
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.2.block.1.weight_g": {
+  "shape": [
+   128,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.2.block.1.weight_v": {
+  "shape": [
+   128,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.2.block.2.alpha": {
+  "shape": [
+   1,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.2.block.3.bias": {
+  "shape": [
+   128
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.2.block.3.weight_g": {
+  "shape": [
+   128,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.2.block.3.weight_v": {
+  "shape": [
+   128,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.3.alpha": {
+  "shape": [
+   1,
+   128,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.4.bias": {
+  "shape": [
+   256
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.4.weight_g": {
+  "shape": [
+   256,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.1.block.4.weight_v": {
+  "shape": [
+   256,
+   128,
+   6
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.0.block.0.alpha": {
+  "shape": [
+   1,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.0.block.1.bias": {
+  "shape": [
+   256
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.0.block.1.weight_g": {
+  "shape": [
+   256,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.0.block.1.weight_v": {
+  "shape": [
+   256,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.0.block.2.alpha": {
+  "shape": [
+   1,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.0.block.3.bias": {
+  "shape": [
+   256
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.0.block.3.weight_g": {
+  "shape": [
+   256,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.0.block.3.weight_v": {
+  "shape": [
+   256,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.1.block.0.alpha": {
+  "shape": [
+   1,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.1.block.1.bias": {
+  "shape": [
+   256
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.1.block.1.weight_g": {
+  "shape": [
+   256,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.1.block.1.weight_v": {
+  "shape": [
+   256,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.1.block.2.alpha": {
+  "shape": [
+   1,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.1.block.3.bias": {
+  "shape": [
+   256
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.1.block.3.weight_g": {
+  "shape": [
+   256,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.1.block.3.weight_v": {
+  "shape": [
+   256,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.2.block.0.alpha": {
+  "shape": [
+   1,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.2.block.1.bias": {
+  "shape": [
+   256
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.2.block.1.weight_g": {
+  "shape": [
+   256,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.2.block.1.weight_v": {
+  "shape": [
+   256,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.2.block.2.alpha": {
+  "shape": [
+   1,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.2.block.3.bias": {
+  "shape": [
+   256
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.2.block.3.weight_g": {
+  "shape": [
+   256,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.2.block.3.weight_v": {
+  "shape": [
+   256,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.3.alpha": {
+  "shape": [
+   1,
+   256,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.4.bias": {
+  "shape": [
+   512
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.4.weight_g": {
+  "shape": [
+   512,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.2.block.4.weight_v": {
+  "shape": [
+   512,
+   256,
+   10
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.0.block.0.alpha": {
+  "shape": [
+   1,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.0.block.1.bias": {
+  "shape": [
+   512
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.0.block.1.weight_g": {
+  "shape": [
+   512,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.0.block.1.weight_v": {
+  "shape": [
+   512,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.0.block.2.alpha": {
+  "shape": [
+   1,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.0.block.3.bias": {
+  "shape": [
+   512
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.0.block.3.weight_g": {
+  "shape": [
+   512,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.0.block.3.weight_v": {
+  "shape": [
+   512,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.1.block.0.alpha": {
+  "shape": [
+   1,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.1.block.1.bias": {
+  "shape": [
+   512
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.1.block.1.weight_g": {
+  "shape": [
+   512,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.1.block.1.weight_v": {
+  "shape": [
+   512,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.1.block.2.alpha": {
+  "shape": [
+   1,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.1.block.3.bias": {
+  "shape": [
+   512
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.1.block.3.weight_g": {
+  "shape": [
+   512,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.1.block.3.weight_v": {
+  "shape": [
+   512,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.2.block.0.alpha": {
+  "shape": [
+   1,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.2.block.1.bias": {
+  "shape": [
+   512
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.2.block.1.weight_g": {
+  "shape": [
+   512,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.2.block.1.weight_v": {
+  "shape": [
+   512,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.2.block.2.alpha": {
+  "shape": [
+   1,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.2.block.3.bias": {
+  "shape": [
+   512
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.2.block.3.weight_g": {
+  "shape": [
+   512,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.2.block.3.weight_v": {
+  "shape": [
+   512,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.3.alpha": {
+  "shape": [
+   1,
+   512,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.4.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.4.weight_g": {
+  "shape": [
+   1024,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.3.block.4.weight_v": {
+  "shape": [
+   1024,
+   512,
+   16
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.0.block.0.alpha": {
+  "shape": [
+   1,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.0.block.1.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.0.block.1.weight_g": {
+  "shape": [
+   1024,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.0.block.1.weight_v": {
+  "shape": [
+   1024,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.0.block.2.alpha": {
+  "shape": [
+   1,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.0.block.3.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.0.block.3.weight_g": {
+  "shape": [
+   1024,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.0.block.3.weight_v": {
+  "shape": [
+   1024,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.1.block.0.alpha": {
+  "shape": [
+   1,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.1.block.1.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.1.block.1.weight_g": {
+  "shape": [
+   1024,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.1.block.1.weight_v": {
+  "shape": [
+   1024,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.1.block.2.alpha": {
+  "shape": [
+   1,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.1.block.3.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.1.block.3.weight_g": {
+  "shape": [
+   1024,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.1.block.3.weight_v": {
+  "shape": [
+   1024,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.2.block.0.alpha": {
+  "shape": [
+   1,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.2.block.1.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.2.block.1.weight_g": {
+  "shape": [
+   1024,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.2.block.1.weight_v": {
+  "shape": [
+   1024,
+   1,
+   7
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.2.block.2.alpha": {
+  "shape": [
+   1,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.2.block.3.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.2.block.3.weight_g": {
+  "shape": [
+   1024,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.2.block.3.weight_v": {
+  "shape": [
+   1024,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.3.alpha": {
+  "shape": [
+   1,
+   1024,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.4.bias": {
+  "shape": [
+   2048
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.4.weight_g": {
+  "shape": [
+   2048,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.block.4.block.4.weight_v": {
+  "shape": [
+   2048,
+   1024,
+   32
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.fc_mu.bias": {
+  "shape": [
+   64
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.fc_mu.weight_g": {
+  "shape": [
+   64,
+   1,
+   1
+  ],
+  "dtype": "torch.float32"
+ },
+ "encoder.fc_mu.weight_v": {
+  "shape": [
+   64,
+   2048,
+   3
+  ],
+  "dtype": "torch.float32"
+ }
+}
