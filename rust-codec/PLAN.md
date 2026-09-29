@@ -75,6 +75,7 @@
 5. 混沌环（e2e 真环）只许断言 stop 序列这类鲁棒量，不许断言波形逐点（torch 自噪实验为证）。
 6. 行主序的“整段拷贝”一律按行写循环（flat copy 只在行宽相等时成立）——stream `Hist::extend` 与两次测试脚手架同坑三犯。
 7. sgemm 语义：bias 按输出行全列折叠，任何“只加一次”的优化先证语义不变。
+8. Latent 三形态（raw / scaled / cond）逐处对源码点名：DiT cond=RAW 上步输出，VAE=scaled，LM 回灌=RAW（:1022）；测试必须给回灌加门限——stop 对不代表音频对（M19 血案）。
 
 ## 7. 流式（M17）
 
@@ -82,5 +83,12 @@
 破案：①`cv()` 自带因果 pad，传 extended 进去等于 pad 两次——加无 pad 的 `valid_conv1d`；②`Hist::extend` flat-copy 行错位（生产代码真 bug，同类第三次）；③small-T 路 bias 只加 j=0 列，违 sgemm 语义（19 vs 20 差的正好是 bias）。教训见 §6.6/6.7。
 
 ## 8. 推理 CLI（M18，本轮）
-
 `src/bin/cutetts.rs`：tokenize → embed → prefill → AR 环 → VAE → wav，零 Python。`src/tok.rs`（sentencepiece crate + 三特殊串先切后 encode，4 文本 id-for-id 精确命中——tricky 证明整串 encode 上下文相关）；`qwen.embed_lookup` 按位 exact；自研 xorshift+Box-Muller RNG（mean -0.0004/var 0.9994，有单测锁死——第一版 uniform 写成 [1,2) 全 NaN 跑 750 步，教训：RNG 上线前必须先过分布测试）。实测：权重 1.4s，prefill 0.09s，AR 41ms/步，e2e 文本 12 步停（torch 13 步）1.92s 音频共 2.2s；同 seed 按位确定；中文同 pathway 过。完整波形不对 torch 比（x0 不同即混沌分叉，M15 已证）——正确性由 teacher-forced 环担保，CLI 只担保确定性 + 分布 + stop  sane。
+
+## 9. 回灌 scaled/raw 大 bug（M19，用户听出后段糊报的案）
+
+症状：CLI 中文“你好清晰、后面消融成杂音”，能量包络正常。teacher-forced 全过、stop 全对——能掩盖 free-run 回灌 bug 的测试全是绿的。
+根因：`generation.py:1022` 回灌用的是 RAW `pred_latent`，我喂了 scaled（`/0.4127`≈2.4 倍），每步复利 + teacher-forced 从不跑回灌 + 真环没给 loc 加门限 = 三重漏网。
+修复：CLI + 两真环改喂 RAW；真环加 loc 门限（<1.0：scaled 版 err ~5，正常版落 bf16 地板 5e-2，判别力足够）。
+效果：真环 drift-z 11.5→0.186（60x），loc 正中 bf16 地板。中文 CLI 12 步 1.92s，能量形态健康，`/tmp/opencode/cli_zh2.wav` 待听。
+教训（§6 补第 8 条）：回灌/cond/scale 三处 latent 形态必须逐处对源码点名，测试必须给回灌加门限——stop 对不代表音频对。

@@ -137,22 +137,30 @@ fn e2e_true_ring_drift() {
     let mut last = r.run_prefill(&mut cache);
     let mut mismatch = 0;
     let mut worst_dz = 0.0f32;
+    let mut worst_loc = 0.0f32;
     for i in 0..r.steps {
         let x0 = load_flat(&format!("{}{i:02}_x0", prefix()));
         let zref = load_flat(&format!("{}{i:02}_z", prefix()));
         let condref = load_flat(&format!("{}{i:02}_cond", prefix()));
         worst_dz = worst_dz.max(max_err(&last, &zref));
-        let (_, scaled) = dit_step(&r.w, &x0, &last, &condref, None, r.nth);
+        let (pred, _) = dit_step(&r.w, &x0, &last, &condref, None, r.nth);
         let sl = stop_logits(&r.w.e2e, &last);
         if (sl[1] > sl[0]) != r.stops[i] {
             mismatch += 1;
         }
         if i + 1 < r.steps {
-            let fb = locenc_embed(&r.w.locenc, &scaled, 1, 1, r.nth);
+            // Feedback is RAW pred (generation.py:1022), not scaled.
+            let fb = locenc_embed(&r.w.locenc, &pred, 1, 1, r.nth);
+            // Gate the feedback itself (missed in M15: scaled-vs-raw input
+            // errs ~5 here, drift+bf16 stays < 1; this gate catches a repeat).
+            let lmin = load_flat(&format!("{}{i:02}_lmin", prefix()));
+            let el = max_err(&fb, &lmin);
+            worst_loc = worst_loc.max(el);
             last = decode_step(&r.w.qwen, &fb, r.tpre + i, &mut cache);
         }
     }
-    println!("true-ring: worst drift-z={worst_dz:.2e} stop_mismatch={mismatch}");
+    println!("true-ring: worst drift-z={worst_dz:.2e} loc={worst_loc:.2e} stop_mismatch={mismatch}");
+    assert!(worst_loc < 1.0, "feedback loc drift {worst_loc:.2e} (scaled-vs-raw bug errs ~5)");
     assert_eq!(mismatch, 0, "stop sequence must match exactly");
     println!("TRUE-RING stop sequence 13/13 match");
 }

@@ -129,7 +129,7 @@ fn clone_true_ring_drift() {
         let condref = load_flat(&format!("clone_{i:02}_cond"));
         let dz = max_err(&last, &zref);
         worst_dz = worst_dz.max(dz);
-        let (_, scaled) = dit_step(&w, &x0, &last, &condref, Some(&spk), nth);
+        let (pred, _) = dit_step(&w, &x0, &last, &condref, Some(&spk), nth);
         let sl = stop_logits(&w.e2e, &last);
         let stop = sl[1] > sl[0];
         if stop != stops[i] {
@@ -140,7 +140,8 @@ fn clone_true_ring_drift() {
             assert!(dz > 3.0, "stop mismatch at low drift step {i} (dz={dz:.2e})");
         }
         if i + 1 < steps {
-            let fb = locenc_embed(&w.locenc, &scaled, 1, 1, nth);
+            // Feedback is RAW pred (generation.py:1022), not scaled.
+            let fb = locenc_embed(&w.locenc, &pred, 1, 1, nth);
             last = decode_step(&w.qwen, &fb, tpre + i, &mut cache);
         }
     }

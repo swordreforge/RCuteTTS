@@ -134,10 +134,12 @@ fn main() {
             let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
             (p, s)
         };
-        // next cond = UNSCALED pred ([2,64] flat, as returned)
+        // next cond = UNSCALED pred ([2,64] flat, as returned).
+        // Feedback MUST be RAW pred too (generation.py:1022 uses pred_latent,
+        // not pred_latent_scaled; scaled compounds every step).
+        let fb = locenc_embed(&w.locenc, &pred, 1, 1, nth);
         cond = pred;
         latents.extend_from_slice(&scaled);
-        let fb = locenc_embed(&w.locenc, &scaled, 1, 1, nth);
         last = decode_step(&w.qwen, &fb, tpre + steps, &mut cache);
         steps += 1;
     }
