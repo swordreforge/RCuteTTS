@@ -6,3 +6,6 @@ dist/
 tests/
 __pycache__/
 *.py[cod]
+.venv/
+rust-codec/target/
+2608.08638v2.pdf
