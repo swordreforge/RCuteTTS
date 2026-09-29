@@ -9,5 +9,6 @@ pub mod locenc;
 pub mod pool;
 pub mod qwen;
 pub mod simd;
+pub mod speaker;
 pub mod snake;
 pub mod weights;

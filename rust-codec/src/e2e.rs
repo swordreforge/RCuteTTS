@@ -8,8 +8,8 @@
 //! gates below allow the measured dtype drift (see dump output).
 
 use crate::dit::{euler_sample, load_dit_weights, DitW};
-use crate::locenc::{load_locenc_weights, locenc_embed, LocencW};
-use crate::qwen::{decode_step, load_qwen_weights, prefill, QwenCache, QwenW};
+use crate::locenc::{load_locenc_weights, LocencW};
+use crate::qwen::{load_qwen_weights, QwenW};
 use crate::weights::load_decoder_weights;
 use crate::weights::DecoderW;
 use safetensors::SafeTensors;
@@ -97,9 +97,10 @@ pub fn dit_step(
     x0: &[f32],
     z: &[f32],
     cond: &[f32],
+    spk: Option<&[f32]>,
     nth: usize,
 ) -> (Vec<f32>, Vec<f32>) {
-    let pred = euler_sample(&w.dit, x0, z, cond, None, 4, 2.0, nth);
+    let pred = euler_sample(&w.dit, x0, z, cond, spk, 4, 2.0, nth);
     let scaled: Vec<f32> = pred.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
     (pred, scaled)
 }

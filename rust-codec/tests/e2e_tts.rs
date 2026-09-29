@@ -88,7 +88,7 @@ fn e2e_teacher_forced() {
         let z = load_flat(&format!("e2e_{i:02}_z"));
         let cond = load_flat(&format!("e2e_{i:02}_cond"));
         let pref = load_flat(&format!("e2e_{i:02}_pred"));
-        let (pred, scaled) = dit_step(&r.w, &x0, &z, &cond, r.nth);
+        let (pred, scaled) = dit_step(&r.w, &x0, &z, &cond, None, r.nth);
         let ed = max_err(&pred, &pref);
         worst_pred = worst_pred.max(ed);
         let sl = stop_logits(&r.w.e2e, &z);
@@ -134,7 +134,7 @@ fn e2e_true_ring_drift() {
         let zref = load_flat(&format!("e2e_{i:02}_z"));
         let condref = load_flat(&format!("e2e_{i:02}_cond"));
         worst_dz = worst_dz.max(max_err(&last, &zref));
-        let (_, scaled) = dit_step(&r.w, &x0, &last, &condref, r.nth);
+        let (_, scaled) = dit_step(&r.w, &x0, &last, &condref, None, r.nth);
         let sl = stop_logits(&r.w.e2e, &last);
         if (sl[1] > sl[0]) != r.stops[i] {
             mismatch += 1;
