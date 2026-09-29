@@ -1,0 +1,4 @@
+<|im_end|>
+text input:
+Hello world, this is a test.
+<|endofprompt|>

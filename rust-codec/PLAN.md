@@ -99,3 +99,7 @@
 ## 11. Resample（M21，本轮，clone 纯 Rust 前置之二）
 
 `src/resample.rs`：逐字复刻 torchaudio sinc_interp_hann（width=6/rolloff=0.99；kernel f64 算完转 fp32；零 padding左width/右width+orig；polyphase stride；ceil 目标长度；同率 passthrough）。8 组变采样率（44.1k/48k/22.05k/24k/16k 互转）一次过，worst 4.2e-6（门限按铁律取 5e-5，12x）。毫秒级，一次性成本。下一步：clone CLI（speech segment fusion + 全串）。
+
+## 12. Clone CLI（M22，本轮）
+
+`cutetts --mode voice_clone`：hound 读 wav → mono → 30s 截断 → reference/speaker 双分支（整段重复补 2s，顺序与 torch 一致：先截断再 resample）→ ECAPA + VAE-enc + `clone_prefix`（5 段融合，speaker slot 经 lm_speaker_linear）→ 同 AR 环（spk=Some）→ wav。`tests/prefix.rs`：piece 精确、ref feats 5.5e-5、文本行按位、speech 行 4.7e-2（bf16 地板）。实测：13 步 2.08s，总 ~4s（weights 1.4 + reference 1.8 + prefill 0.18 + AR 0.6 + VAE 0.2）。虚惊：prefill T=65 显示 3.4s——计时点框错（含 weights+reference），真值 0.13s。

@@ -1,0 +1,3 @@
+Transform the text into speech output, utilizing the distinct voice of the provided speech sample.
+voice reference:
+<|im_start|>

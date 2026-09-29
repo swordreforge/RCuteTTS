@@ -52,11 +52,35 @@ impl Rng {
 
 fn usage() -> ! {
     eprintln!("usage: cutetts --text TEXT --output OUT.wav [--model-dir DIR] [--seed N] [--max-steps N]");
+    eprintln!("       cutetts --mode voice_clone --reference-audio REF.wav --text TEXT --output OUT.wav [...]");
     std::process::exit(2);
 }
 
 fn arg_val(args: &[String], name: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
+}
+
+/// Read any PCM/float wav to mono f32 + sample rate (hound).
+fn read_wav_mono(path: &str) -> (Vec<f32>, usize) {
+    let mut reader =
+        hound::WavReader::open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+    let spec = reader.spec();
+    let ch = spec.channels as usize;
+    let frames: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
+        (hound::SampleFormat::Float, 32) => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
+        (hound::SampleFormat::Int, 16) => reader
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32768.0)
+            .collect(),
+        (hound::SampleFormat::Int, 24) | (hound::SampleFormat::Int, 32) => reader
+            .samples::<i32>()
+            .map(|s| (s.unwrap() as f64 / 2147483648.0) as f32)
+            .collect(),
+        (f, b) => panic!("unsupported wav format {f:?}/{b}: {path}"),
+    };
+    assert_eq!(frames.len() % ch, 0);
+    let mono = cutetts_codec::prefix::to_mono(&frames, ch);
+    (mono, spec.sample_rate as usize)
 }
 
 fn write_wav_16(path: &std::path::Path, samples: &[f32], sample_rate: u32) {    let mut data = Vec::with_capacity(44 + samples.len() * 2);
@@ -103,12 +127,54 @@ fn main() {
     );
     println!("weights loaded in {:.1}s", t0.elapsed().as_secs_f32());
 
-    let t0 = Instant::now();
-    let ids = tok.encode_tts(&text);
-    println!("tokenized: {} ids", ids.len());
-    let prefix = embed_lookup(&w.qwen, &ids);
-    let tpre = ids.len();
+    let mode = arg_val(&args, "--mode").unwrap_or_else(|| "tts".to_string());
+    if mode != "tts" && mode != "voice_clone" {
+        usage();
+    }
+    // Prefix + optional speaker. tts: text only; clone: full reference chain.
+    let (prefix, tpre, spk_opt): (Vec<f32>, usize, Option<Vec<f32>>) = if mode == "tts" {
+        let ids = tok.encode_tts(&text);
+        println!("tokenized: {} ids", ids.len());
+        let t = ids.len();
+        (embed_lookup(&w.qwen, &ids), t, None)
+    } else {
+        let ref_path = arg_val(&args, "--reference-audio").unwrap_or_else(|| usage());
+        let t1 = Instant::now();
+        let (mono, sr) = read_wav_mono(&ref_path);
+        // torch caps the read at ~30s of source frames
+        let cap_frames = (30 * sr + 159) / 160 * 160;
+        let mono = if mono.len() > cap_frames { &mono[..cap_frames] } else { &mono[..] };
+        let spk_wave = cutetts_codec::prefix::speaker_branch_16k(mono, sr);
+        let ref24 = cutetts_codec::prefix::reference_branch_24k(mono, sr);
+        let sw = cutetts_codec::speaker::load_speaker_weights(
+            &root.join("weights/speaker_encoder/model.safetensors"),
+        );
+        let ve = cutetts_codec::vae_enc::load_vae_enc_weights(
+            &root.join("weights/audio_vae/model.safetensors"),
+        );
+        let lw = cutetts_codec::locenc::load_locenc_weights(
+            &root.join("weights/tts/model.safetensors"),
+        );
+        let pw = cutetts_codec::prefix::load_prefix_weights(
+            &root.join("weights/tts/model.safetensors"),
+        );
+        let spk = cutetts_codec::speaker::speaker_forward(&sw, &spk_wave, nth);
+        let (feats, nf) = cutetts_codec::prefix::reference_features(&ve, &ref24, nth);
+        println!(
+            "reference: {} -> {} spk frames, {} ref frames ({:.2}s)",
+            ref_path,
+            spk_wave.len(),
+            nf,
+            t1.elapsed().as_secs_f32()
+        );
+        let (embeds, t) = cutetts_codec::prefix::clone_prefix(
+            &tok, &w.qwen, &lw, &pw, &text, &feats, nf, &spk,
+            w.e2e.scale, w.e2e.bias, nth,
+        );
+        (embeds, t, Some(spk))
+    };
     let mut cache = QwenCache::empty();
+    let t0 = Instant::now();
     let h = prefill(&w.qwen, &prefix, tpre, 0, &mut cache, nth);
     let mut last = h[(tpre - 1) * 1024..tpre * 1024].to_vec();
     println!("prefill T={tpre}: {:.2}s", t0.elapsed().as_secs_f32());
@@ -130,7 +196,7 @@ fn main() {
             break;
         }
         let (pred, scaled) = {
-            let p = euler_sample(&w.dit, &x0, &last, &cond, None, 4, 2.0, nth);
+            let p = euler_sample(&w.dit, &x0, &last, &cond, spk_opt.as_deref(), 4, 2.0, nth);
             let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
             (p, s)
         };

@@ -7,6 +7,7 @@ pub mod ffi;
 pub mod gemm;
 pub mod locenc;
 pub mod pool;
+pub mod prefix;
 pub mod qwen;
 pub mod resample;
 pub mod simd;
