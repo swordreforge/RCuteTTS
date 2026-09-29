@@ -269,6 +269,55 @@ pub unsafe fn micro_8x8_fma(
     );
 }
 
+// ============================================================
+// bf16 -> f32 conversion (LM ticket: Qwen3-7L + LocEnc are bf16).
+// ============================================================
+//
+// bf16 is exactly the top 16 bits of f32, so conversion is bit-preserving:
+// `f32_bits = (bf16_bits as u32) << 16` — no rounding, no tolerance needed,
+// NaN/Inf payloads preserved. AVX2 path: 128-bit u16 load -> cvtepu16 ->
+// slli 16 -> bitcast store, 8 lanes per iteration.
+
+/// Scalar bf16->f32 oracle (also the non-x86 fallback).
+#[inline]
+pub fn bf16_to_f32_scalar(dst: &mut [f32], src: &[u16]) {
+    assert_eq!(dst.len(), src.len());
+    for (d, &s) in dst.iter_mut().zip(src.iter()) {
+        *d = f32::from_bits((s as u32) << 16);
+    }
+}
+
+/// AVX2 bf16->f32: bitwise identical to [`bf16_to_f32_scalar`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn bf16_to_f32_avx2(dst: *mut f32, src: *const u16, n: usize) {
+    let mut i = 0;
+    while i + 8 <= n {
+        let v16 = _mm_loadu_si128(src.add(i) as *const __m128i);
+        let v32 = _mm256_cvtepu16_epi32(v16);
+        let shifted = _mm256_slli_epi32::<16>(v32);
+        _mm256_storeu_ps(dst.add(i), _mm256_castsi256_ps(shifted));
+        i += 8;
+    }
+    while i < n {
+        *dst.add(i) = f32::from_bits((*src.add(i) as u32) << 16);
+        i += 1;
+    }
+}
+
+/// Dispatched bf16->f32 (exact on all paths).
+#[inline]
+pub fn bf16_to_f32(dst: &mut [f32], src: &[u16]) {
+    assert_eq!(dst.len(), src.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            return unsafe { bf16_to_f32_avx2(dst.as_mut_ptr(), src.as_ptr(), src.len()) };
+        }
+    }
+    bf16_to_f32_scalar(dst, src)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,8 +365,7 @@ mod tests {
 
     #[test]
     #[cfg(target_arch = "x86_64")]
-    fn micro_fma_within_tolerance() {
-        if !has_avx2_fma() {
+    fn micro_fma_within_tolerance() {        if !has_avx2_fma() {
             eprintln!("no AVX2+FMA, skipping");
             return;
         }
@@ -385,5 +433,35 @@ mod tests {
         // still has 100x margin.
         let max_rel = c1.iter().zip(c2.iter()).map(|(a, b)| (a - b).abs() / a.abs().max(1e-6)).fold(0.0, f32::max);
         assert!(max_rel < 1e-5, "max_rel={max_rel}");
+    }
+
+    #[test]
+    fn bf16_to_f32_bitwise() {
+        // bit-preserving: f32_bits == (bf16_bits as u32) << 16 for ALL patterns
+        // (normals, subnormals, zeros, inf, nan) — no tolerance needed.
+        let mut st = 555u64;
+        // exhaustive lows + random + specials
+        let mut src: Vec<u16> = (0..=0xFFFFu32).step_by(997).map(|v| v as u16).collect();
+        src.extend((0..4096).map(|_| (xrng(&mut st) & 0xFFFF) as u16));
+        src.extend([0x0000, 0x8000, 0x7F80, 0xFF80, 0x7FC0, 0xFFC0, 0x0001, 0x7F7F, 0x3C00]);
+        let mut d1 = vec![0.0f32; src.len()];
+        let mut d2 = vec![0.0f32; src.len()];
+        bf16_to_f32_scalar(&mut d1, &src);
+        bf16_to_f32(&mut d2, &src);
+        for (i, ((a, b), &s)) in d1.iter().zip(d2.iter()).zip(src.iter()).enumerate() {
+            assert!(a.to_bits() == b.to_bits(), "[{i}] s={s:#06x}: {a} vs {b}");
+            assert_eq!(a.to_bits(), (s as u32) << 16, "[{i}] shift identity");
+        }
+        // cross-check against the `half` crate as an independent oracle.
+        // NOTE: restricted to non-NaN: `half` canonicalizes NaN payloads
+        // while shift (like torch/CUDA __bfloat162float) preserves bits.
+        // Weights are finite, so this never matters for loading.
+        for &s in &src {
+            if s & 0x7F80 == 0x7F80 && s & 0x007F != 0 {
+                continue; // NaN: payload handling differs by design
+            }
+            let h = half::bf16::from_bits(s).to_f32().to_bits();
+            assert_eq!(h, (s as u32) << 16, "half crate disagrees on {s:#06x}");
+        }
     }
 }
