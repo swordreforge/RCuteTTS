@@ -126,3 +126,10 @@
 - 流式 vs 离线差 3.05e-5 ≈ 1 LSB（int16 量化地板，不可闻）；多包流式为 raw
   concat（trim/pad/crossfade 跳过，测试模式已在 help 注明）。
 - 门：`wav_stream_roundtrip`（头回填+i16 限幅）；短句流式 e2e 首包+对差。
+
+## 16. 管道播放（M26，本轮）
+- `--output -`：裸 s16le 单声道 24k 到 stdout；`say!` 宏让人话日志让路 stderr，
+  管道保持干净。`StdoutRaw` 下游关闭（head）时静默 exit(0)，不 panic。
+- 门：管道字节 == 文件模式 wav 体（bit-identical）；head 截断干净退出。
+- 播法：`... --output - --stream | play -t raw -r 24000 -e signed -b 16 -c 1 -`
+  或 `... | ffplay -f s16le -ar 24000 -ac 1 -i -`。

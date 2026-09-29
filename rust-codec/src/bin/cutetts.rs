@@ -23,6 +23,14 @@ use cutetts_codec::tok::PromptTokenizer;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+/// Human logs: stdout normally, stderr when PCM goes to stdout (`--output -`)
+/// so piped audio stays clean.
+macro_rules! say {
+    ($pipe:expr, $($t:tt)*) => {
+        if $pipe { eprintln!($($t)*) } else { println!($($t)*) }
+    };
+}
+
 /// xorshift64* + Box-Muller normals (deterministic, seeded).
 struct Rng(u64);
 
@@ -70,7 +78,10 @@ options:
   --text-file PATH         read text from file (trailing newline trimmed;
                          long text auto-splits into sentence chunks, 30ms
                          crossfade join; chunk seeds = base+idx)
-  --output PATH            output wav (16-bit mono 24kHz, overwritten)
+  --output PATH            output wav (16-bit mono 24kHz, overwritten);
+                         `-` = raw s16le mono 24k to stdout for piping:
+                           ... --output - --stream | play -t raw -r 24000 -e signed -b 16 -c 1 -
+                           ... --output - | ffplay -f s16le -ar 24000 -ac 1 -i -
   --seed N                 u64 seed; default = random each run (printed, reuse to replay)
   --max-steps N            default 750 (each step = 2 latent frames = 0.16s)
   --chunk-seeds same|incr default same (one seed for all chunks: stable
@@ -212,6 +223,52 @@ impl WavStream {
     }
 }
 
+/// Raw s16le mono PCM to stdout (`--output -`): no header (players take
+/// `-t raw -r 24000 -e signed -b 16 -c 1`), nothing to patch at the end.
+struct StdoutRaw {
+    out: std::io::Stdout,
+    n: u64,
+}
+
+impl StdoutRaw {
+    fn new() -> Self {
+        StdoutRaw { out: std::io::stdout(), n: 0 }
+    }
+
+    fn push(&mut self, samples: &[f32]) {
+        use std::io::Write;
+        let mut buf = Vec::with_capacity(samples.len() * 2);
+        for &v in samples {
+            let s = (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            buf.extend_from_slice(&s.to_le_bytes());
+        }
+        // Downstream closed (e.g. `| head -c N`): exit quietly like a
+        // well-behaved Unix filter instead of panicking on SIGPIPE noise.
+        if let Err(e) = self.out.write_all(&buf) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+            panic!("stdout write: {e}");
+        }
+        self.n += samples.len() as u64;
+    }
+}
+
+/// Byte sink for PCM: wav file (header + patch) or stdout raw.
+enum Sink {
+    File(WavStream),
+    Std(StdoutRaw),
+}
+
+impl Sink {
+    fn push(&mut self, samples: &[f32]) {
+        match self {
+            Sink::File(w) => w.push(samples),
+            Sink::Std(w) => w.push(samples),
+        }
+    }
+}
+
 fn write_wav_16(path: &std::path::Path, samples: &[f32], sample_rate: u32) {    let mut data = Vec::with_capacity(44 + samples.len() * 2);
     let n = samples.len() as u32;
     data.extend_from_slice(b"RIFF");
@@ -257,7 +314,8 @@ fn synth_one(
     max_steps: usize,
     nth: usize,
     clone: Option<&CloneCtx>,
-    stream: Option<&mut WavStream>,
+    stream: Option<&mut Sink>,
+    pipe_log: bool,
 ) -> (Vec<f32>, usize) {
     let t00 = Instant::now();
     // Prefix. tts: text only; clone: full reference chain.
@@ -279,7 +337,7 @@ fn synth_one(
     let t0 = Instant::now();
     let h = prefill(&w.qwen, &prefix, tpre, 0, &mut cache, nth);
     let mut last = h[(tpre - 1) * 1024..tpre * 1024].to_vec();
-    println!("prefill T={tpre}: {:.2}s", t0.elapsed().as_secs_f32());
+    say!(pipe_log, "prefill T={tpre}: {:.2}s", t0.elapsed().as_secs_f32());
 
     let mut vstream = stream.map(|ws| {
         (ws, cutetts_codec::stream::StreamingDecoder::new(&w.vae, nth), false)
@@ -324,7 +382,7 @@ fn synth_one(
             wav_streamed.extend_from_slice(&pcm);
             if !*first {
                 *first = true;
-                println!("first packet: {:.2}s after chunk start", t00.elapsed().as_secs_f32());
+                say!(pipe_log, "first packet: {:.2}s after chunk start", t00.elapsed().as_secs_f32());
             }
         } else {
             latents.extend_from_slice(&scaled);
@@ -373,7 +431,9 @@ fn main() {
         }
     };
     let out = arg_val(&args, "--output").unwrap_or_else(|| usage());
-    if std::path::Path::new(&out).exists() {
+    // `--output -` pipes raw s16le mono 24k PCM to stdout (see --stream).
+    let pipe = out == "-";
+    if !pipe && std::path::Path::new(&out).exists() {
         eprintln!("cutetts: warn: overwriting {out}");
     }
     let ref_opt = arg_val(&args, "--reference-audio");
@@ -416,9 +476,9 @@ fn main() {
         // Must precede first pool use (pool sizes itself once from this var).
         std::env::set_var("CUTETTS_THREADS", n.to_string());
     }
-    println!("cutetts mode={mode} seed={seed} ({seed_src}) max_steps={max_steps}");
+    say!(pipe, "cutetts mode={mode} seed={seed} ({seed_src}) max_steps={max_steps}");
     let nth = default_threads();
-    println!("threads={nth} model={model_dir}");
+    say!(pipe, "threads={nth} model={model_dir}");
     let root = PathBuf::from(&model_dir);
     for p in [
         root.join("tokenizer/tokenizer.model"),
@@ -436,7 +496,7 @@ fn main() {
         &root.join("weights/tts/model.safetensors"),
         &root.join("weights/audio_vae/model.safetensors"),
     );
-    println!("weights loaded in {:.1}s", t0.elapsed().as_secs_f32());
+    say!(pipe, "weights loaded in {:.1}s", t0.elapsed().as_secs_f32());
 
     // Reference state once (clone) — reused by every chunk.
     // (mode / ref_opt validated above.)
@@ -465,7 +525,8 @@ fn main() {
         );
         let spk = cutetts_codec::speaker::speaker_forward(&sw, &spk_wave, nth);
         let (feats, nf) = cutetts_codec::prefix::reference_features(&ve, &ref24, nth);
-        println!(
+        say!(
+            pipe,
             "reference: {} -> {} spk frames, {} ref frames ({:.2}s)",
             ref_path,
             spk_wave.len(),
@@ -482,7 +543,7 @@ fn main() {
     let pieces: Vec<String> = if from_file {
         let v = cutetts_codec::chunk::split_sentences(&text);
         if v.len() > 1 {
-            println!("text-file: {} chunks", v.len());
+            say!(pipe, "text-file: {} chunks", v.len());
             v
         } else {
             vec![text]
@@ -491,13 +552,19 @@ fn main() {
         vec![text]
     };
     let t0 = Instant::now();
-    // --stream: PCM hits the file per AR step (first packet right after
+    // --stream: PCM hits the sink per AR step (first packet right after
     // prefill + 1 step). Raw concat — trim/pad/crossfade are skipped in
     // this test mode (documented; offline output keeps seam hygiene).
+    // `--output -` pipes raw s16le mono 24k to stdout (players: play/ffplay
+    // below); all human logs move to stderr so the pipe stays clean.
     let streaming = has_flag(&args, "--stream");
-    let mut ws_opt = if streaming {
-        println!("stream: incremental write to {out}");
-        Some(WavStream::create(PathBuf::from(&out).as_path(), 24000))
+    let mut sink_opt: Option<Sink> = if streaming {
+        say!(pipe, "stream: incremental write to {out}");
+        if pipe {
+            Some(Sink::Std(StdoutRaw::new()))
+        } else {
+            Some(Sink::File(WavStream::create(PathBuf::from(&out).as_path(), 24000)))
+        }
     } else {
         None
     };
@@ -510,19 +577,28 @@ fn main() {
         // `incr` reproduces the old base+idx behavior.
         let cs = if chunk_seeds == "incr" { seed.wrapping_add(idx as u64) } else { seed };
         if pieces.len() > 1 {
-            println!("--- chunk {}/{} ({} chars, seed={cs}) ---", idx + 1, pieces.len(), piece.chars().count());
+            say!(pipe, "--- chunk {}/{} ({} chars, seed={cs}) ---", idx + 1, pieces.len(), piece.chars().count());
         }
         let t1 = Instant::now();
-        let (wav, steps) = synth_one(&w, &tok, piece, cs, max_steps, nth, clone_ctx.as_ref(), ws_opt.as_mut());
-        println!("chunk {}: {steps} steps, {:.2}s audio ({:.2}s)", idx + 1, wav.len() as f32 / 24000.0, t1.elapsed().as_secs_f32());
+        let (wav, steps) = synth_one(&w, &tok, piece, cs, max_steps, nth, clone_ctx.as_ref(), sink_opt.as_mut(), pipe);
+        say!(pipe, "chunk {}: {steps} steps, {:.2}s audio ({:.2}s)", idx + 1, wav.len() as f32 / 24000.0, t1.elapsed().as_secs_f32());
         total_steps += steps;
         wavs.push(wav);
     }
-    println!("total: {total_steps} steps in {:.1}s", t0.elapsed().as_secs_f32());
-    if let Some(ws) = ws_opt {
-        ws.finish();
-        let dur = wavs.iter().map(|v| v.len()).sum::<usize>() as f32 / 24000.0;
-        println!("wrote {out} ({dur:.2}s audio streamed, seed={seed}, chunks={})", pieces.len());
+    say!(pipe, "total: {total_steps} steps in {:.1}s", t0.elapsed().as_secs_f32());
+    if let Some(sink) = sink_opt {
+        match sink {
+            Sink::File(ws) => {
+                ws.finish();
+                let dur = wavs.iter().map(|v| v.len()).sum::<usize>() as f32 / 24000.0;
+                say!(pipe, "wrote {out} ({dur:.2}s audio streamed, seed={seed}, chunks={})", pieces.len());
+            }
+            Sink::Std(_) => {
+                // raw PCM already fully piped; nothing to patch
+                let dur = wavs.iter().map(|v| v.len()).sum::<usize>() as f32 / 24000.0;
+                say!(pipe, "piped ({dur:.2}s audio streamed, seed={seed}, chunks={})", pieces.len());
+            }
+        }
         return;
     }
     // Seam hygiene (QORA): per-chunk trim to 0.25s max gaps/tails, then
@@ -538,9 +614,17 @@ fn main() {
             .collect();
         cutetts_codec::chunk::crossfade_concat(&cleaned, 720)
     };
+    if pipe {
+        // offline pipe: one raw dump at the end (no wav header)
+        let mut raw = StdoutRaw::new();
+        raw.push(&wav);
+        let dur = wav.len() as f32 / 24000.0;
+        say!(pipe, "piped ({dur:.2}s audio, seed={seed}, chunks={})", pieces.len());
+        return;
+    }
     write_wav_16(PathBuf::from(&out).as_path(), &wav, 24000);
     let dur = wav.len() as f32 / 24000.0;
-    println!("wrote {out} ({dur:.2}s audio, seed={seed}, chunks={})", pieces.len());
+    say!(pipe, "wrote {out} ({dur:.2}s audio, seed={seed}, chunks={})", pieces.len());
 }
 
 #[cfg(test)]
