@@ -1,9 +1,11 @@
 //! Pure-Rust tts CLI (distill, offline): text -> wav, no Python.
 //!
-//! Usage (from rust-codec/):
-//!   cutetts --text "Hello world." --output out.wav [--seed 42] [--max-steps 750]
-//!   cutetts --model-dir ../model/CuteTTS --text "..." --output out.wav
+//!   cutetts --text "Hello world." --output out.wav
+//!   cutetts --mode voice_clone --reference-audio ref.wav --text "..." --output out.wav
+//!   cutetts --help
 //!
+//! Seed: OS-random each run unless --seed N is given; the run always prints
+//! `seed <N>` — pass it back to replay bit-identically (same machine/threads).
 //! Pipeline: tokenize -> embed lookup -> Qwen prefill -> AR loop
 //! (LM decode -> stop? -> DiT 4-step (own xorshift RNG) -> scale ->
 //! LocEnc feedback) -> concat latents -> VAE whole decode -> 24k i16 wav.
@@ -18,7 +20,7 @@ use cutetts_codec::locenc::locenc_embed;
 use cutetts_codec::qwen::{decode_step, embed_lookup, prefill, QwenCache};
 use cutetts_codec::tok::PromptTokenizer;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// xorshift64* + Box-Muller normals (deterministic, seeded).
 struct Rng(u64);
@@ -50,14 +52,78 @@ impl Rng {
     }
 }
 
+fn help() -> ! {
+    print!(
+        "\
+cutetts (distill, offline): text -> 24k wav, no Python.
+
+usage:
+  cutetts --text TEXT --output OUT.wav [options]
+  cutetts --text-file FILE --output OUT.wav [options]
+  cutetts --mode voice_clone --reference-audio REF.wav --text TEXT --output OUT.wav [options]
+
+options:
+  --mode tts|voice_clone   default tts (clone needs --reference-audio)
+  --reference-audio PATH   reference wav for voice_clone (any PCM/mono-stereo/rate)
+  --text TEXT              text to speak (mutually exclusive with --text-file)
+  --text-file PATH         read text from file (trailing newline trimmed)
+  --output PATH            output wav (16-bit mono 24kHz, overwritten)
+  --seed N                 u64 seed; default = random each run (printed, reuse to replay)
+  --max-steps N            default 750 (each step = 2 latent frames = 0.16s)
+  --model-dir DIR          default <manifest>/../model/CuteTTS-distill
+  --threads N              override CUTETTS_THREADS / ncpu
+  --help, -h               this message
+
+repro: the run prints `seed <N>`; pass it back via --seed for bit-identical output
+       on the same machine/thread count. seed 0 is remapped (xorshift guard).
+"
+    );
+    std::process::exit(0);
+}
+
 fn usage() -> ! {
-    eprintln!("usage: cutetts --text TEXT --output OUT.wav [--model-dir DIR] [--seed N] [--max-steps N]");
-    eprintln!("       cutetts --mode voice_clone --reference-audio REF.wav --text TEXT --output OUT.wav [...]");
+    eprintln!("usage: cutetts --text TEXT --output OUT.wav [--mode tts|voice_clone] [--seed N]");
+    eprintln!("       cutetts --help for full options");
     std::process::exit(2);
 }
 
+fn err(msg: &str) -> ! {
+    eprintln!("cutetts: error: {msg}");
+    eprintln!("try `cutetts --help`");
+    std::process::exit(2);
+}
+
+fn has_flag(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| a == name)
+}
+
 fn arg_val(args: &[String], name: &str) -> Option<String> {
-    args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone())
+    // Supports both `--name value` and `--name=value`.
+    let eq = format!("{name}=");
+    for (i, a) in args.iter().enumerate() {
+        if a == name {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(v) = a.strip_prefix(&eq) {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Random seed when --seed is absent (QORA-style): nanos since epoch,
+/// std-only and cross-platform (no /dev/urandom, no rand crate).
+/// May be 0 in theory — callers route it through effective_seed.
+fn random_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E3779B97F4A7C15)
+}
+
+/// xorshift64* gets stuck at state 0 — remap seed 0 to a fixed nonzero.
+fn effective_seed(seed: u64) -> u64 {
+    if seed == 0 { 0x9E3779B97F4A7C15 } else { seed }
 }
 
 /// Read any PCM/float wav to mono f32 + sample rate (hound).
@@ -106,18 +172,74 @@ fn write_wav_16(path: &std::path::Path, samples: &[f32], sample_rate: u32) {    
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let text = arg_val(&args, "--text").unwrap_or_else(|| usage());
+    if has_flag(&args, "--help") || has_flag(&args, "-h") || args.len() < 2 {
+        help();
+    }
+    let mode = arg_val(&args, "--mode").unwrap_or_else(|| "tts".to_string());
+    if mode != "tts" && mode != "voice_clone" {
+        err(&format!("--mode must be tts or voice_clone, got `{mode}`"));
+    }
+    let text_opt = arg_val(&args, "--text");
+    let text_file_opt = arg_val(&args, "--text-file");
+    let text = match (text_opt, text_file_opt) {
+        (Some(_), Some(_)) => err("--text and --text-file are mutually exclusive"),
+        (None, None) => usage(),
+        (Some(t), None) => t,
+        (None, Some(f)) => {
+            let s = std::fs::read_to_string(&f).unwrap_or_else(|e| panic!("read {f}: {e}"));
+            let s = s.trim().to_string();
+            if s.is_empty() {
+                err(&format!("text file is empty: {f}"));
+            }
+            s
+        }
+    };
     let out = arg_val(&args, "--output").unwrap_or_else(|| usage());
+    if std::path::Path::new(&out).exists() {
+        eprintln!("cutetts: warn: overwriting {out}");
+    }
+    let ref_opt = arg_val(&args, "--reference-audio");
+    if mode == "voice_clone" && ref_opt.is_none() {
+        err("--mode voice_clone requires --reference-audio REF.wav");
+    }
+    if mode == "tts" && ref_opt.is_some() {
+        err("--reference-audio needs --mode voice_clone (tts ignores reference)");
+    }
     let model_dir = arg_val(&args, "--model-dir").unwrap_or_else(|| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../model/CuteTTS-distill")
             .to_string_lossy()
             .into_owned()
     });
-    let seed: u64 = arg_val(&args, "--seed").map(|v| v.parse().unwrap_or_else(|_| usage())).unwrap_or(42);
-    let max_steps: usize = arg_val(&args, "--max-steps").map(|v| v.parse().unwrap_or_else(|_| usage())).unwrap_or(750);
+    let (seed, seed_src): (u64, &str) = match arg_val(&args, "--seed") {
+        Some(v) => (v.parse::<u64>().unwrap_or_else(|_| err("--seed must be a u64")), "user"),
+        None => (random_seed(), "random"),
+    };
+    let max_steps: usize = match arg_val(&args, "--max-steps") {
+        Some(v) => v.parse().unwrap_or_else(|_| err("--max-steps must be an integer")),
+        None => 750,
+    };
+    if let Some(v) = arg_val(&args, "--threads") {
+        let n: usize = v.parse().unwrap_or_else(|_| err("--threads must be an integer >= 1"));
+        if n < 1 {
+            err("--threads must be >= 1");
+        }
+        // Must precede first pool use (pool sizes itself once from this var).
+        std::env::set_var("CUTETTS_THREADS", n.to_string());
+    }
+    println!("cutetts mode={mode} seed={seed} ({seed_src}) max_steps={max_steps}");
     let nth = default_threads();
+    println!("threads={nth} model={model_dir}");
     let root = PathBuf::from(&model_dir);
+    for p in [
+        root.join("tokenizer/tokenizer.model"),
+        root.join("weights/tts/model.safetensors"),
+        root.join("weights/audio_vae/model.safetensors"),
+    ] {
+        if !p.is_file() {
+            err(&format!("model file missing: {} (--model-dir={model_dir})", p.display()));
+        }
+    }
 
     let t0 = Instant::now();
     let tok = PromptTokenizer::load(&root.join("tokenizer/tokenizer.model"));
@@ -127,18 +249,15 @@ fn main() {
     );
     println!("weights loaded in {:.1}s", t0.elapsed().as_secs_f32());
 
-    let mode = arg_val(&args, "--mode").unwrap_or_else(|| "tts".to_string());
-    if mode != "tts" && mode != "voice_clone" {
-        usage();
-    }
     // Prefix + optional speaker. tts: text only; clone: full reference chain.
+    // (mode / ref_opt validated above.)
     let (prefix, tpre, spk_opt): (Vec<f32>, usize, Option<Vec<f32>>) = if mode == "tts" {
         let ids = tok.encode_tts(&text);
         println!("tokenized: {} ids", ids.len());
         let t = ids.len();
         (embed_lookup(&w.qwen, &ids), t, None)
     } else {
-        let ref_path = arg_val(&args, "--reference-audio").unwrap_or_else(|| usage());
+        let ref_path = ref_opt.clone().unwrap();
         let t1 = Instant::now();
         let (mono, sr) = read_wav_mono(&ref_path);
         // torch caps the read at ~30s of source frames
@@ -179,7 +298,7 @@ fn main() {
     let mut last = h[(tpre - 1) * 1024..tpre * 1024].to_vec();
     println!("prefill T={tpre}: {:.2}s", t0.elapsed().as_secs_f32());
 
-    let mut rng = Rng(if seed == 0 { 0x9E3779B97F4A7C15 } else { seed });
+    let mut rng = Rng(effective_seed(seed));
     let mut cond = vec![0.0f32; 128]; // initial previous cond = zeros [1,2,64]
     let mut latents: Vec<f32> = Vec::new();
     let mut steps = 0;
@@ -224,7 +343,7 @@ fn main() {
     println!("vae decode: {:.2}s", t0.elapsed().as_secs_f32());
     write_wav_16(PathBuf::from(&out).as_path(), &wav, 24000);
     let dur = wav.len() as f32 / 24000.0;
-    println!("wrote {} ({dur:.2}s audio)", out);
+    println!("wrote {out} ({dur:.2}s audio, seed={seed})");
 }
 
 #[cfg(test)]
@@ -247,5 +366,33 @@ mod tests {
         let mut a = Rng(7);
         let mut b = Rng(7);
         assert_eq!(a.normals(257), b.normals(257));
+    }
+
+    #[test]
+    fn seed_zero_remapped() {
+        assert_eq!(effective_seed(0), 0x9E3779B97F4A7C15);
+        assert_eq!(effective_seed(42), 42);
+        // remapped seed still draws finite normals (no stuck-at-zero state)
+        let mut rng = Rng(effective_seed(0));
+        assert!(rng.normals(1024).iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn arg_val_eq_form() {
+        let args = vec!["cutetts".to_string(), "--seed=42".to_string(), "--text".to_string(), "hi".to_string()];
+        assert_eq!(arg_val(&args, "--seed"), Some("42".to_string()));
+        assert_eq!(arg_val(&args, "--text"), Some("hi".to_string()));
+        assert_eq!(arg_val(&args, "--missing"), None);
+    }
+
+    #[test]
+    fn random_seed_nonzero() {
+        // Statistical, not strict: just guards a broken clock path.
+        for _ in 0..10 {
+            if random_seed() != 0 {
+                return;
+            }
+        }
+        panic!("random_seed stuck at 0");
     }
 }
