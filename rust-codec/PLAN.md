@@ -95,3 +95,7 @@
 ## 10. VAE encoder（M20，本轮，clone 纯 Rust 前置）
 
 `src/vae_enc.rs`：encoder 121 tensors 中 118 个（`fc_logvar` 推理无用，sigma 后验只取 mode——断言 shapes，跳过有注释）；res 全 depthwise k7 + pointwise（已有 causal 核直用）；4 个 strided dense conv 走 im2col+sgemm（torch floor 语义，hop 对齐下值精确）；fc_mu k3。`tests/vae_enc.rs`：exact-multiple/non-multiple pad/真 reference 四条，worst 5.9e-5（门限 1e-3，17x，按铁律不用动）。性能：ref（46 帧）1.14s vs torch 0.55s——瓶颈是末级 strided（67M 参数，49G MACs），一次性成本（reference 可缓存），认了。下一步：clone CLI（resample + speech segment fusion + ECAPA/VAE-enc/DiT 全串）。
+
+## 11. Resample（M21，本轮，clone 纯 Rust 前置之二）
+
+`src/resample.rs`：逐字复刻 torchaudio sinc_interp_hann（width=6/rolloff=0.99；kernel f64 算完转 fp32；零 padding左width/右width+orig；polyphase stride；ceil 目标长度；同率 passthrough）。8 组变采样率（44.1k/48k/22.05k/24k/16k 互转）一次过，worst 4.2e-6（门限按铁律取 5e-5，12x）。毫秒级，一次性成本。下一步：clone CLI（speech segment fusion + 全串）。

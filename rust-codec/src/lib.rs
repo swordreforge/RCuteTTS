@@ -8,6 +8,7 @@ pub mod gemm;
 pub mod locenc;
 pub mod pool;
 pub mod qwen;
+pub mod resample;
 pub mod simd;
 pub mod speaker;
 pub mod stream;
