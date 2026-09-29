@@ -70,18 +70,22 @@ pub fn sgemm_bias_with_kind(
         return sgemm_range(a, b, t, bias, c, t, 0, pr, 0, t, kind);
     }
     // Small-T: 1D row chunks written directly (no temp tiles, no atomics).
+    // Dispatched on the persistent pool (no per-call thread spawn).
     if ctasks == 1 {
         let panels = pr / MR;
         let per = (panels + nth - 1) / nth;
-        std::thread::scope(|s| {
-            for (pi, chunk) in c.chunks_mut(per * MR * t).enumerate() {
+        let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = c
+            .chunks_mut(per * MR * t)
+            .enumerate()
+            .map(|(pi, chunk)| {
                 let p0 = pi * per;
                 let p1 = (p0 + per).min(panels);
-                s.spawn(move || {
+                Box::new(move || {
                     sgemm_range(a, b, t, bias, chunk, t, p0 * MR, p1 * MR, 0, t, kind);
-                });
-            }
-        });
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        crate::pool::scope(jobs);
         return;
     }
     struct Task {
@@ -103,17 +107,18 @@ pub fn sgemm_bias_with_kind(
     }
     let c_ptr = c.as_mut_ptr() as usize;
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let next_ref = &next;
-    let tasks_ref = &tasks;
-    std::thread::scope(|s| {
-        let workers = nth.min(tasks.len());
-        for _ in 0..workers {
-            s.spawn(move || loop {
-                let idx = next_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if idx >= tasks_ref.len() {
+    let workers = nth.min(tasks.len());
+    // Pool-dispatched work-stealing (same as before, no per-call spawn):
+    // each pool job pulls task tiles off the shared counter (hybrid-CPU
+    // friendly: fast cores drain more tiles).
+    let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..workers)
+        .map(|_| {
+            Box::new(|| loop {
+                let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if idx >= tasks.len() {
                     break;
                 }
-                let task = &tasks_ref[idx];
+                let task = &tasks[idx];
                 let (rn, tn) = (task.r1 - task.r0, task.t1 - task.t0);
                 let mut tile = vec![0.0f32; rn * tn];
                 sgemm_range(a, b, t, bias, &mut tile, tn, task.r0, task.r1, task.t0, task.t1, kind);
@@ -125,9 +130,10 @@ pub fn sgemm_bias_with_kind(
                         std::ptr::copy_nonoverlapping(src, dst, tn);
                     }
                 }
-            });
-        }
-    });
+            }) as Box<dyn FnOnce() + Send + '_>
+        })
+        .collect();
+    crate::pool::scope(jobs);
 }
 
 /// Compute output rows `[r0, r1)` x cols `[tc0, tc1)` into `c`,

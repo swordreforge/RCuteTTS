@@ -179,6 +179,38 @@ fn linear_gemv(l: &DitLinear, x: &[f32], kind: SaxpyKind) -> Vec<f32> {
     let (o, k) = (l.out_dim, l.w.cols);
     assert_eq!(x.len(), k);
     let panels = l.w.rows / 8;
+    // Pool-dispatch big GEMVs (>= 1M MACs); small ones stay serial.
+    // Bitwise identical either way (disjoint panels).
+    let nth = crate::conv::default_threads();
+    let ops = o as u64 * k as u64;
+    if nth <= 1 || ops < 1_000_000 || panels <= 1 {
+        return linear_gemv_serial(l, x, kind);
+    }
+    let per = (panels + nth - 1) / nth;
+    let mut y = vec![0.0f32; panels * 8];
+    let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = y
+        .chunks_mut(per * 8)
+        .enumerate()
+        .map(|(pi, chunk)| {
+            let p0 = pi * per;
+            let p1 = (p0 + per).min(panels);
+            Box::new(move || {
+                for p in p0..p1 {
+                    let mut bb = [0.0f32; 8];
+                    bb.copy_from_slice(&l.b[p * 8..(p + 1) * 8]);
+                    run_gemv8(kind, &l.w.data[p * k * 8..(p + 1) * k * 8], x, k, &bb, &mut chunk[(p - p0) * 8..(p - p0 + 1) * 8]);
+                }
+            }) as Box<dyn FnOnce() + Send + '_>
+        })
+        .collect();
+    crate::pool::scope(jobs);
+    y.truncate(o);
+    y
+}
+
+fn linear_gemv_serial(l: &DitLinear, x: &[f32], kind: SaxpyKind) -> Vec<f32> {
+    let (o, k) = (l.out_dim, l.w.cols);
+    let panels = l.w.rows / 8;
     let mut y = vec![0.0f32; panels * 8];
     for p in 0..panels {
         let mut bb = [0.0f32; 8];

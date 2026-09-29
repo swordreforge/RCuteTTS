@@ -5,6 +5,7 @@ pub mod dit;
 pub mod ffi;
 pub mod gemm;
 pub mod locenc;
+pub mod pool;
 pub mod qwen;
 pub mod simd;
 pub mod snake;
