@@ -1,0 +1,25 @@
+{
+ "text": "\u4f60\u597d\uff0c\u8fd9\u662f\u4e2d\u6587\u6d4b\u8bd5\u3002",
+ "seed": 42,
+ "steps": 13,
+ "lm_decodes": 12,
+ "stops": [
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  true
+ ],
+ "scale": 0.4127216339111328,
+ "bias": -0.0021514892578125,
+ "sample_rate": 24000,
+ "prefix_len": 23
+}
