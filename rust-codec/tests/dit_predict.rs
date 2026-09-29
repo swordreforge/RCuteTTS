@@ -41,7 +41,7 @@ fn dit_predict_3_vectors() {
         let refr = load_vec(&format!("dit_p{i:02}_out"));
         assert_eq!((x.len(), z.len(), cond.len(), spk.len(), refr.len()), (128, 1024, 128, 256, 128));
         let t0 = std::time::Instant::now();
-        let v = predict(&w, &x, t[0], &z, &cond, 0.25, &spk, 2.0, 1);
+        let v = predict(&w, &x, t[0], &z, &cond, 0.25, Some(&spk), 2.0, 1);
         let dt = t0.elapsed().as_secs_f32();
         assert_eq!(v.len(), refr.len());
         let e: f32 = v.iter().zip(refr.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
@@ -50,6 +50,28 @@ fn dit_predict_3_vectors() {
         assert!(e < 1e-3, "dit_p{i:02} max_err={e}");
     }
     println!("DiT predict gate passed, worst err={worst:.2e}");
+}
+
+#[test]
+fn dit_predict_plain_no_speaker() {
+    // tts path: speaker_embedding=None -> plain residuals (no modulate/gate).
+    let wpath = manifest()
+        .join("..")
+        .join("model/CuteTTS-distill/weights/tts/model.safetensors");
+    if !wpath.is_file() {
+        eprintln!("skip: weights not found at {}", wpath.display());
+        return;
+    }
+    let w = load_dit_weights(&wpath);
+    let x = load_vec("dit_nospk_x");
+    let t = vec![0.25f32];
+    let z = load_vec("dit_nospk_z");
+    let cond = load_vec("dit_nospk_cond");
+    let refr = load_vec("dit_nospk_out");
+    let v = predict(&w, &x, t[0], &z, &cond, 0.25, None, 2.0, 1);
+    let e: f32 = v.iter().zip(refr.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+    println!("dit_nospk: err={e:.2e}");
+    assert!(e < 1e-3, "dit_nospk max_err={e}");
 }
 
 #[test]
@@ -70,7 +92,7 @@ fn dit_euler_sample_2_vectors() {
         let x0 = load_vec(&format!("dit_s{i:02}_x0"));
         let refr = load_vec(&format!("dit_s{i:02}_out"));
         let t0 = std::time::Instant::now();
-        let out = euler_sample(&w, &x0, &z, &cond, &spk, 4, 2.0, 1);
+        let out = euler_sample(&w, &x0, &z, &cond, Some(&spk), 4, 2.0, 1);
         let dt = t0.elapsed().as_secs_f32();
         assert_eq!(out.len(), refr.len());
         let e: f32 = out.iter().zip(refr.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);

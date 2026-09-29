@@ -24,12 +24,12 @@ fn main() {
         load_vec("dit_s00_x0"),
     );
     let refr = load_vec("dit_s00_out");
-    euler_sample(&w, &x0, &z, &cond, &spk, 4, 2.0, nth); // warmup
+    euler_sample(&w, &x0, &z, &cond, Some(&spk), 4, 2.0, nth); // warmup
     let reps = 5;
     let t0 = Instant::now();
     let mut out = vec![];
     for _ in 0..reps {
-        out = euler_sample(&w, &x0, &z, &cond, &spk, 4, 2.0, nth);
+        out = euler_sample(&w, &x0, &z, &cond, Some(&spk), 4, 2.0, nth);
     }
     let ms = t0.elapsed().as_secs_f32() * 1000.0 / reps as f32;
     let e: f32 = out.iter().zip(refr.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);

@@ -2,6 +2,7 @@ pub mod conv;
 pub mod decode;
 pub mod decoder;
 pub mod dit;
+pub mod e2e;
 pub mod ffi;
 pub mod gemm;
 pub mod locenc;

@@ -273,22 +273,41 @@ pub(crate) fn softmax_row(x: &mut [f32]) {
 
 /// One LocalTransformerLayer with precomputed AdaLN params.
 /// h: [SEQ, HIDDEN] row-major, in/out. ad: 6x1024 (shift/scale/gate attn/mlp).
-fn dit_layer(h: &mut [f32], lw: &DitLayerW, ad: &[f32], nth: usize, cos: &[f32], sin: &[f32]) {
-    assert_eq!(ad.len(), 6 * HIDDEN);
-    let (sh_a, rest) = ad.split_at(HIDDEN);
-    let (sc_a, rest) = rest.split_at(HIDDEN);
-    let (ga_a, rest) = rest.split_at(HIDDEN);
-    let (sh_m, rest) = rest.split_at(HIDDEN);
-    let (sc_m, rest) = rest.split_at(HIDDEN);
-    let (ga_m, _) = rest.split_at(HIDDEN);
+fn dit_layer(h: &mut [f32], lw: &DitLayerW, ad: Option<&[f32]>, nth: usize, cos: &[f32], sin: &[f32]) {
+    // ad: 6x1024 (shift/scale/gate attn/mlp); None = plain residual path
+    // (torch: speaker_adaln None or speaker_embedding None).
+    let (sh_a, sc_a, ga_a, sh_m, sc_m, ga_m) = match ad {
+        Some(ad) => {
+            assert_eq!(ad.len(), 6 * HIDDEN);
+            let (sh_a, rest) = ad.split_at(HIDDEN);
+            let (sc_a, rest) = rest.split_at(HIDDEN);
+            let (ga_a, rest) = rest.split_at(HIDDEN);
+            let (sh_m, rest) = rest.split_at(HIDDEN);
+            let (sc_m, rest) = rest.split_at(HIDDEN);
+            let (ga_m, _) = rest.split_at(HIDDEN);
+            (sh_a, sc_a, ga_a, sh_m, sc_m, ga_m)
+        }
+        None => (&[][..], &[][..], &[][..], &[][..], &[][..], &[][..]),
+    };
+    let modulate = |normed: &[f32], sh: &[f32], sc: &[f32]| -> Vec<f32> {
+        if ad.is_none() {
+            return normed.to_vec();
+        }
+        normed.iter().enumerate().map(|(d, &v)| v * (1.0 + sc[d]) + sh[d]).collect()
+    };
+    let gate_scale = |g: &[f32]| -> Vec<f32> {
+        if ad.is_none() {
+            return vec![1.0; HIDDEN];
+        }
+        g.iter().map(|&v| 1.0 + v).collect()
+    };
 
     // --- attention block ---
     let mut normed = vec![0.0f32; SEQ * HIDDEN];
     for s in 0..SEQ {
         let n = rms_norm_row(&h[s * HIDDEN..(s + 1) * HIDDEN], &lw.norm1);
-        for d in 0..HIDDEN {
-            normed[s * HIDDEN + d] = n[d] * (1.0 + sc_a[d]) + sh_a[d];
-        }
+        let m = modulate(&n, sh_a, sc_a);
+        normed[s * HIDDEN..(s + 1) * HIDDEN].copy_from_slice(&m);
     }
     let q = linear_rows(&normed, SEQ, &lw.q, nth); // [5,1024]
     let k = linear_rows(&normed, SEQ, &lw.k, nth); // [5,128]
@@ -338,9 +357,10 @@ fn dit_layer(h: &mut [f32], lw: &DitLayerW, ad: &[f32], nth: usize, cos: &[f32],
         }
     }
     let attn_proj = linear_rows(&attn_out, SEQ, &lw.o, nth);
+    let ga = gate_scale(ga_a);
     for s in 0..SEQ {
         for d in 0..HIDDEN {
-            h[s * HIDDEN + d] += (1.0 + ga_a[d]) * attn_proj[s * HIDDEN + d];
+            h[s * HIDDEN + d] += ga[d] * attn_proj[s * HIDDEN + d];
         }
     }
 
@@ -348,9 +368,8 @@ fn dit_layer(h: &mut [f32], lw: &DitLayerW, ad: &[f32], nth: usize, cos: &[f32],
     let mut normed2 = vec![0.0f32; SEQ * HIDDEN];
     for s in 0..SEQ {
         let n = rms_norm_row(&h[s * HIDDEN..(s + 1) * HIDDEN], &lw.norm2);
-        for d in 0..HIDDEN {
-            normed2[s * HIDDEN + d] = n[d] * (1.0 + sc_m[d]) + sh_m[d];
-        }
+        let m = modulate(&n, sh_m, sc_m);
+        normed2[s * HIDDEN..(s + 1) * HIDDEN].copy_from_slice(&m);
     }
     let gate = linear_rows(&normed2, SEQ, &lw.mlp.gate, nth);
     let up = linear_rows(&normed2, SEQ, &lw.mlp.up, nth);
@@ -360,9 +379,10 @@ fn dit_layer(h: &mut [f32], lw: &DitLayerW, ad: &[f32], nth: usize, cos: &[f32],
         act[i] = g * up[i];
     }
     let down = linear_rows(&act, SEQ, &lw.mlp.down, nth);
+    let gm = gate_scale(ga_m);
     for s in 0..SEQ {
         for d in 0..HIDDEN {
-            h[s * HIDDEN + d] += (1.0 + ga_m[d]) * down[s * HIDDEN + d];
+            h[s * HIDDEN + d] += gm[d] * down[s * HIDDEN + d];
         }
     }
 }
@@ -389,14 +409,16 @@ pub fn predict(
     z: &[f32],
     cond: &[f32],
     dt: f32,
-    spk: &[f32],
+    spk: Option<&[f32]>,
     cfg_w: f32,
     nth: usize,
 ) -> Vec<f32> {
     assert_eq!(x.len(), PATCH * LATENT);
     assert_eq!(z.len(), HIDDEN);
     assert_eq!(cond.len(), PATCH * LATENT);
-    assert_eq!(spk.len(), SPK);
+    if let Some(s) = spk {
+        assert_eq!(s.len(), SPK);
+    }
 
     let xh = linear_rows(x, PATCH, &w.in_proj, nth); // [2,1024]
     let ch = linear_rows(cond, PATCH, &w.cond_proj, nth);
@@ -415,11 +437,20 @@ pub fn predict(
     seq[HIDDEN..3 * HIDDEN].copy_from_slice(&ch);
     seq[3 * HIDDEN..].copy_from_slice(&xh);
 
-    // speaker adaln once per predict: [6144]
+    // speaker adaln once per predict (None = plain path)
     let (cos, sin) = rope_tables_for(SEQ);
-    for lw in &w.layers {
-        let adl = linear_rows(spk, 1, &lw.adaln, nth);
-        dit_layer(&mut seq, lw, &adl, nth, &cos, &sin);
+    match spk {
+        Some(s) => {
+            for lw in &w.layers {
+                let adl = linear_rows(s, 1, &lw.adaln, nth);
+                dit_layer(&mut seq, lw, Some(&adl), nth, &cos, &sin);
+            }
+        }
+        None => {
+            for lw in &w.layers {
+                dit_layer(&mut seq, lw, None, nth, &cos, &sin);
+            }
+        }
     }
     for s in 0..SEQ {
         let n = rms_norm_row(&seq[s * HIDDEN..(s + 1) * HIDDEN], &w.final_norm);
@@ -437,7 +468,7 @@ pub fn predict_default(
     z: &[f32],
     cond: &[f32],
     dt: f32,
-    spk: &[f32],
+    spk: Option<&[f32]>,
     cfg_w: f32,
 ) -> Vec<f32> {
     predict(w, x, t, z, cond, dt, spk, cfg_w, default_threads())
@@ -450,16 +481,17 @@ pub struct SampleCond {
     pub dt_emb: Vec<f32>,
     pub step_emb: Vec<f32>,
     pub cfg_emb: Vec<f32>,
-    pub adalns: Vec<Vec<f32>>, // [layer][6144]
+    /// Per-layer adaln; None = plain path (tts without speaker).
+    pub adalns: Option<Vec<Vec<f32>>>, // [layer][6144]
 }
 
 /// Prologue of sample(): conditions that are constant across Euler steps.
 /// t_emb is NOT included (depends on step t).
-pub fn sample_prologue(w: &DitW, spk: &[f32], dt: f32, cfg_w: f32, nth: usize) -> SampleCond {
+pub fn sample_prologue(w: &DitW, spk: Option<&[f32]>, dt: f32, cfg_w: f32, nth: usize) -> SampleCond {
     let dt_emb = time_mlp(&sin_emb(0.0), &w.delta_mlp1, &w.delta_mlp2, nth);
     let step_emb = time_mlp(&sin_emb(dt), &w.step_mlp1, &w.step_mlp2, nth);
     let cfg_emb = cfg_emb(cfg_w / 5.0, &w.cfg_emb0, &w.cfg_emb2, nth);
-    let adalns = w.layers.iter().map(|lw| linear_rows(spk, 1, &lw.adaln, nth)).collect();
+    let adalns = spk.map(|s| w.layers.iter().map(|lw| linear_rows(s, 1, &lw.adaln, nth)).collect());
     SampleCond { dt_emb, step_emb, cfg_emb, adalns }
 }
 
@@ -486,8 +518,17 @@ fn predict_cached(
     seq[..HIDDEN].copy_from_slice(&mu);
     seq[HIDDEN..3 * HIDDEN].copy_from_slice(&ch);
     seq[3 * HIDDEN..].copy_from_slice(&xh);
-    for (lw, adl) in w.layers.iter().zip(sc.adalns.iter()) {
-        dit_layer(&mut seq, lw, adl, nth, cos, sin);
+    match &sc.adalns {
+        Some(ads) => {
+            for (lw, adl) in w.layers.iter().zip(ads.iter()) {
+                dit_layer(&mut seq, lw, Some(adl), nth, cos, sin);
+            }
+        }
+        None => {
+            for lw in &w.layers {
+                dit_layer(&mut seq, lw, None, nth, cos, sin);
+            }
+        }
     }
     for s in 0..SEQ {
         let n = rms_norm_row(&seq[s * HIDDEN..(s + 1) * HIDDEN], &w.final_norm);
@@ -504,7 +545,7 @@ pub fn euler_sample(
     x0: &[f32],
     z: &[f32],
     cond: &[f32],
-    spk: &[f32],
+    spk: Option<&[f32]>,
     steps: usize,
     cfg_w: f32,
     nth: usize,
