@@ -33,7 +33,8 @@
 - M1 算子对齐：conv / transpose / Snake / norm 单算子 vs torch 差分测试，bit-exact。✅ done：`cargo test` 10/10（dilation 3/9、depthwise、stride 16/3、residual unit，门限 1e-4，见 `tests/m1_ops.rs` + `scripts/dump_m1_fixtures.py`）
 - M2 整句 decode 对齐：Python dump `latent[64,T]` → Rust decode → `max_abs_err < 1e-4`，10 条样本全过。✅ done：10/10 全过，worst err 4.2e-7（门限放宽到 1e-3，实际近 bit 级），见 `tests/m2_decode.rs` + `scripts/dump_m2_vectors.py`；naive 单线程基线：0.64s 音频 4.1s（RTF 6.4），M3 优化空间明确
 - M3 性能：AVX2 + 线程池，单句 decode RTF < 0.5，与 Python 版同句对比。✅ done：naive 单线程 RTF 6.4 → 并行 + f32 + 边界剥离 + 1x1 SAXPY 后 RTF 0.31（1.92s 音频 0.6s，22线程，`CUTETTS_THREADS` 可调），对齐误差仍 5.6e-7；`target-cpu=native` 无额外收益，未采用
-- M4 接入：Python `AudioStreamingVAEDecoder` 后端可切换 `rust|torch`，`inference` 端到端回归（tts + voice_clone各3条）。✅ done（范围：整句 offline `decode()` 经 `CUTETTS_VAE_BACKEND=rust` 切换，见 `src/cutetts/modeling/rust_vae.py` + `src/ffi.rs`；voice_clone 流式仍走 torch）：单元 err 3.9e-7，e2e 3条 tts err ~2e-6，voice_clone 冒烟过。⚠️ 实测本机 MKL-torch decode 反而快 ~3x（60帧：torch 0.53s vs rust 1.51s），端到端 CPU 推理本就 LM-bound，用户侧无可感差异；Rust 版价值在免 torch 部署/可嵌入，超 MKL 需后续 blocked-GEMM，另立项
+- M4 接入：Python `AudioStreamingVAEDecoder` 后端可切换 `rust|torch`，`inference` 端到端回归（tts + voice_clone各3条）。✅ done（范围：整句 offline `decode()` 经 `CUTETTS_VAE_BACKEND=rust` 切换，见 `src/cutetts/modeling/rust_vae.py` + `src/ffi.rs`；voice_clone 流式仍走 torch）：单元 err 3.9e-7，e2e 3条 tts err ~2e-6，voice_clone 冒烟过。
+- M5（pivot）：FFI 对比有拷贝/线程池污染，改干净对比——`scripts/bench_torch_decode.py`（纯 torch）vs `src/bin/decode_bench.rs`（纯 Rust binary，同 latent npy）。24帧：torch 0.209s（RTF 0.109）vs rust 0.254s（RTF 0.132），rust 慢 1.22x；120帧：torch 1.202s vs rust 1.301s，差距收窄到 1.08x。对齐 err 3.7e-7。结论：正确性已锁，差的是 GEMM 内核（MKL 有 AVX512/FMA + B-pack + 预取，我们只有朴素 FMA 循环靠 autovec）。下一步：手写 AVX2/FMA 8xN 微内核。
 
 ## 5. 风险
 
