@@ -18,6 +18,14 @@ fn manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn prefix() -> String {
+    std::env::var("E2E_PREFIX").unwrap_or_else(|_| "e2e_".to_string())
+}
+
+fn meta_name() -> String {
+    format!("{}meta.json", prefix())
+}
+
 fn load_flat(name: &str) -> Vec<f32> {
     let p = manifest().join(format!("testdata/{name}.npy"));
     if let Ok(a) = read_npy::<_, ndarray::Array3<f32>>(p.clone()) {
@@ -50,13 +58,13 @@ impl Ring {
             return None;
         }
         let meta: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(manifest().join("e2e_meta.json")).unwrap(),
+            &std::fs::read_to_string(manifest().join(meta_name())).unwrap(),
         )
         .unwrap();
         let t0 = std::time::Instant::now();
         let w = load_all(&tts, &vae);
         println!("weights loaded in {:.1}s", t0.elapsed().as_secs_f32());
-        let prefix = load_flat("e2e_prefix");
+        let prefix = load_flat(&format!("{}prefix", prefix()));
         Some(Ring {
             w,
             nth: cutetts_codec::conv::default_threads(),
@@ -67,7 +75,7 @@ impl Ring {
     }
 
     fn run_prefill(&self, cache: &mut Vec<QwenCache>) -> Vec<f32> {
-        let prefix = load_flat("e2e_prefix");
+        let prefix = load_flat(&format!("{}prefix", prefix()));
         let h = prefill(&self.w.qwen, &prefix, self.tpre, 0, cache, self.nth);
         h[(self.tpre - 1) * 1024..self.tpre * 1024].to_vec()
     }
@@ -84,10 +92,10 @@ fn e2e_teacher_forced() {
     let mut worst_pred = 0.0f32;
     let mut worst_stop = 0;
     for i in 0..r.steps {
-        let x0 = load_flat(&format!("e2e_{i:02}_x0"));
-        let z = load_flat(&format!("e2e_{i:02}_z"));
-        let cond = load_flat(&format!("e2e_{i:02}_cond"));
-        let pref = load_flat(&format!("e2e_{i:02}_pred"));
+        let x0 = load_flat(&format!("{}{i:02}_x0", prefix()));
+        let z = load_flat(&format!("{}{i:02}_z", prefix()));
+        let cond = load_flat(&format!("{}{i:02}_cond", prefix()));
+        let pref = load_flat(&format!("{}{i:02}_pred", prefix()));
         let (pred, scaled) = dit_step(&r.w, &x0, &z, &cond, None, r.nth);
         let ed = max_err(&pred, &pref);
         worst_pred = worst_pred.max(ed);
@@ -110,7 +118,7 @@ fn e2e_teacher_forced() {
         }
     }
     let wav = decode_nth(&r.w.vae, &frames, nframes, r.nth);
-    let refwav = load_flat("e2e_wav");
+    let refwav = load_flat(&format!("{}wav", prefix()));
     assert_eq!(wav.len(), refwav.len());
     let ew = max_err(&wav, &refwav);
     println!("teacher-forced wav err={ew:.2e}");
@@ -130,9 +138,9 @@ fn e2e_true_ring_drift() {
     let mut mismatch = 0;
     let mut worst_dz = 0.0f32;
     for i in 0..r.steps {
-        let x0 = load_flat(&format!("e2e_{i:02}_x0"));
-        let zref = load_flat(&format!("e2e_{i:02}_z"));
-        let condref = load_flat(&format!("e2e_{i:02}_cond"));
+        let x0 = load_flat(&format!("{}{i:02}_x0", prefix()));
+        let zref = load_flat(&format!("{}{i:02}_z", prefix()));
+        let condref = load_flat(&format!("{}{i:02}_cond", prefix()));
         worst_dz = worst_dz.max(max_err(&last, &zref));
         let (_, scaled) = dit_step(&r.w, &x0, &last, &condref, None, r.nth);
         let sl = stop_logits(&r.w.e2e, &last);

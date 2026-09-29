@@ -7,6 +7,7 @@ Hooks (monkeypatch, no production changes):
 Saves: prefix embeds, initial DiT cond, scale/bias, per-step records,
 final latents + waveform. Text chosen for a handful of AR steps.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -26,7 +27,8 @@ from cutetts.modeling.sampling import set_sampler_compile_mode  # noqa: E402
 
 set_sampler_compile_mode("eager")  # avoid torch.compile vs monkeypatch clash
 
-TEXT = "Hello world, this is a test."
+TEXT = os.environ.get("E2E_TEXT", "Hello world, this is a test.")
+PREFIX = os.environ.get("E2E_PREFIX", "e2e_")
 rec = {"x0": [], "pred": [], "lm_in": [], "lm_pos": [], "lm_out": [], "stop": []}
 
 orig_euler_fn = None
@@ -92,19 +94,19 @@ def main() -> None:
     assert len(rec["stop"]) == n_steps == 13 or True
     assert len(rec["px"]) == 4 * n_steps
     assert n_lm == n_steps - 1  # last iteration breaks before LM decode
-    save("e2e_prefix", rec["lm_in"][0])
-    save("e2e_prefix_pos", rec["lm_pos"][0].float())
+    save(f"{PREFIX}prefix", rec["lm_in"][0])
+    save(f"{PREFIX}prefix_pos", rec["lm_pos"][0].float())
     for i in range(n_steps):
-        save(f"e2e_{i:02d}_x0", rec["px"][4 * i])
-        save(f"e2e_{i:02d}_z", rec["pz"][4 * i])
-        save(f"e2e_{i:02d}_cond", rec["pcond"][4 * i])
-        save(f"e2e_{i:02d}_pred", rec["pred"][i])
+        save(f"{PREFIX}{i:02d}_x0", rec["px"][4 * i])
+        save(f"{PREFIX}{i:02d}_z", rec["pz"][4 * i])
+        save(f"{PREFIX}{i:02d}_cond", rec["pcond"][4 * i])
+        save(f"{PREFIX}{i:02d}_pred", rec["pred"][i])
     for i in range(n_lm):
-        save(f"e2e_{i:02d}_lmin", rec["lm_in"][i + 1])
-        save(f"e2e_{i:02d}_lmout", rec["lm_out"][i + 1])
+        save(f"{PREFIX}{i:02d}_lmin", rec["lm_in"][i + 1])
+        save(f"{PREFIX}{i:02d}_lmout", rec["lm_out"][i + 1])
     # initial cond: run prefill-equivalent? cond0 = initial_previous_cond — grab via fresh generate? Simplest: first-step DiT cond == recorded separately below.
     print("scale:", float(rt.model.speech_scaling_factor), "bias:", float(rt.model.speech_bias_factor))
-    with open(OUT.parent / "e2e_meta.json", "w") as f:
+    with open(OUT.parent / f"{PREFIX.rstrip(chr(95))}_meta.json", "w") as f:
         import json
         json.dump({
             "text": TEXT, "seed": 42, "steps": n_steps, "lm_decodes": n_lm,
@@ -114,7 +116,7 @@ def main() -> None:
             "sample_rate": res.sample_rate,
             "prefix_len": rec["lm_in"][0].shape[1],
         }, f, indent=1)
-    save("e2e_wav", res.waveform)
+    save(f"{PREFIX}wav", res.waveform)
     print("done ->", OUT)
 
 
