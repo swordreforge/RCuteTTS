@@ -4,6 +4,7 @@ pub mod decoder;
 pub mod dit;
 pub mod ffi;
 pub mod gemm;
+pub mod locenc;
 pub mod simd;
 pub mod snake;
 pub mod weights;

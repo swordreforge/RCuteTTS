@@ -167,10 +167,11 @@ const ATTN_SCALE: f32 = 1.0 / 8.0; // 1/sqrt(64)
 
 /// Linear on row-major `[S, I]` -> `[S, O]`. Pads S to 8 cols so the
 /// 8x8 micro-kernel fires; big MLP linears thread, tiny ones stay serial.
-fn linear_rows(x: &[f32], s: usize, l: &DitLinear, nth: usize) -> Vec<f32> {
+pub(crate) fn linear_rows(x: &[f32], s: usize, l: &DitLinear, nth: usize) -> Vec<f32> {
     let i = l.w.cols;
     let o = l.out_dim;
     assert_eq!(x.len(), s * i);
+    assert!(s <= 8, "linear_rows handles at most 8 rows (DiT S<=5); use chunking for more");
     const T: usize = 8;
     let mut xb = vec![0.0f32; i * T];
     for ii in 0..i {
@@ -190,7 +191,7 @@ fn linear_rows(x: &[f32], s: usize, l: &DitLinear, nth: usize) -> Vec<f32> {
     out
 }
 
-fn rms_norm_row(x: &[f32], w: &[f32]) -> Vec<f32> {
+pub(crate) fn rms_norm_row(x: &[f32], w: &[f32]) -> Vec<f32> {
     assert_eq!(x.len(), w.len());
     let mut s = 0.0f32;
     for &v in x {
@@ -218,13 +219,13 @@ fn sin_emb(x: f32) -> Vec<f32> {
     out
 }
 
-/// RoPE cos/sin tables for positions 0..SEQ, head_dim 64, theta 1e4.
+/// RoPE cos/sin tables for `seq` positions, head_dim 64, theta 1e4.
 /// Layout: [pos][2*32] with emb=[f,f] (matches _apply_local_rope).
-fn rope_tables() -> (Vec<f32>, Vec<f32>) {
+pub(crate) fn rope_tables_for(seq: usize) -> (Vec<f32>, Vec<f32>) {
     const D2: usize = HEAD_DIM / 2;
-    let mut cos = vec![0.0f32; SEQ * HEAD_DIM];
-    let mut sin = vec![0.0f32; SEQ * HEAD_DIM];
-    for p in 0..SEQ {
+    let mut cos = vec![0.0f32; seq * HEAD_DIM];
+    let mut sin = vec![0.0f32; seq * HEAD_DIM];
+    for p in 0..seq {
         for i in 0..D2 {
             let f = p as f32 * ROPE_THETA.powf(-((2 * i) as f32) / HEAD_DIM as f32);
             let (s, c) = f.sin_cos();
@@ -237,7 +238,7 @@ fn rope_tables() -> (Vec<f32>, Vec<f32>) {
     (cos, sin)
 }
 
-fn rope_apply(v: &[f32], pos: usize, cos: &[f32], sin: &[f32]) -> Vec<f32> {
+pub(crate) fn rope_apply(v: &[f32], pos: usize, cos: &[f32], sin: &[f32]) -> Vec<f32> {
     // v: [64]; out = v*cos + rotate_half(v)*sin
     assert_eq!(v.len(), HEAD_DIM);
     const D2: usize = HEAD_DIM / 2;
@@ -251,7 +252,7 @@ fn rope_apply(v: &[f32], pos: usize, cos: &[f32], sin: &[f32]) -> Vec<f32> {
     out
 }
 
-fn softmax_row(x: &mut [f32]) {
+pub(crate) fn softmax_row(x: &mut [f32]) {
     let m = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut s = 0.0f32;
     for v in x.iter_mut() {
@@ -409,7 +410,7 @@ pub fn predict(
     seq[3 * HIDDEN..].copy_from_slice(&xh);
 
     // speaker adaln once per predict: [6144]
-    let (cos, sin) = rope_tables();
+    let (cos, sin) = rope_tables_for(SEQ);
     for lw in &w.layers {
         let adl = linear_rows(spk, 1, &lw.adaln, nth);
         dit_layer(&mut seq, lw, &adl, nth, &cos, &sin);
@@ -505,7 +506,7 @@ pub fn euler_sample(
     assert_eq!(x0.len(), PATCH * LATENT);
     let dt = 1.0 / steps as f32;
     let sc = sample_prologue(w, spk, dt, cfg_w, nth);
-    let (cos, sin) = rope_tables();
+    let (cos, sin) = rope_tables_for(SEQ);
     let mut x = x0.to_vec();
     for step in 0..steps {
         let t = step as f32 * dt;

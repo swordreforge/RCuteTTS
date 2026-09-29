@@ -1,0 +1,165 @@
+{
+ "locenc.encoder.layers.0.input_layernorm.weight": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.0.mlp.down_proj.weight": {
+  "shape": [
+   1024,
+   4096
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.0.mlp.gate_proj.weight": {
+  "shape": [
+   4096,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.0.mlp.up_proj.weight": {
+  "shape": [
+   4096,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.0.post_attention_layernorm.weight": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.0.self_attn.k_proj.weight": {
+  "shape": [
+   128,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.0.self_attn.o_proj.weight": {
+  "shape": [
+   1024,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.0.self_attn.q_proj.weight": {
+  "shape": [
+   1024,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.0.self_attn.v_proj.weight": {
+  "shape": [
+   128,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.input_layernorm.weight": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.mlp.down_proj.weight": {
+  "shape": [
+   1024,
+   4096
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.mlp.gate_proj.weight": {
+  "shape": [
+   4096,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.mlp.up_proj.weight": {
+  "shape": [
+   4096,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.post_attention_layernorm.weight": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.self_attn.k_proj.weight": {
+  "shape": [
+   128,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.self_attn.o_proj.weight": {
+  "shape": [
+   1024,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.self_attn.q_proj.weight": {
+  "shape": [
+   1024,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.layers.1.self_attn.v_proj.weight": {
+  "shape": [
+   128,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.encoder.norm.weight": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.in_proj.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.in_proj.weight": {
+  "shape": [
+   1024,
+   64
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc.special_token": {
+  "shape": [
+   1,
+   1,
+   1,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc_to_lm_proj.bias": {
+  "shape": [
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ },
+ "locenc_to_lm_proj.weight": {
+  "shape": [
+   1024,
+   1024
+  ],
+  "dtype": "torch.bfloat16"
+ }
+}
