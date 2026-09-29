@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,6 +86,9 @@ class AudioAcousticVAEAdapter(nn.Module):
         self.sample_rate = int(model.sample_rate)
         self.channels = int(getattr(model, "channels", 1))
         self._streaming_decoder_active = False
+        self._weights_path = weights_path
+        self._rust_decoder = None
+        self._rust_requested = os.environ.get("CUTETTS_VAE_BACKEND", "torch").lower() == "rust"
 
     def encode(self, audio: torch.Tensor, *args, **kwargs) -> AudioEncodeOutput:
         if audio.dim() == 2:
@@ -96,6 +100,12 @@ class AudioAcousticVAEAdapter(nn.Module):
         return AudioEncodeOutput(mean=posterior.mode())
 
     def decode(self, latent: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        if self._rust_requested:
+            if self._rust_decoder is None:
+                from cutetts.modeling.rust_vae import RustVAEDecoder
+
+                self._rust_decoder = RustVAEDecoder(self._weights_path)
+            return self._rust_decoder.decode(latent)
         return self.model.decode(latent).float()
 
     def streaming_decode(self) -> "AudioStreamingVAEDecoder":
