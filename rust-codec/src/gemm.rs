@@ -158,16 +158,14 @@ fn sgemm_small_t(
     use crate::simd::run_gemv8;
     let (pr, k) = (a.rows, a.cols);
     let panels = pr / MR;
-    // gemv8 over one panel; B column gathered once per col, bias folded at j=0.
+    // gemv8 over one panel; B column gathered once per col. Bias applies
+    // to EVERY column (sgemm semantics; the transpose path depends on it).
     fn panel_col(
         a: &PackedA,
-        b: &[f32],
-        t: usize,
         k: usize,
         bias: &[f32],
         kind: SaxpyKind,
         p: usize,
-        j: usize,
         bcol: &[f32],
         out8: &mut [f32],
     ) {
@@ -186,7 +184,7 @@ fn sgemm_small_t(
                 bcol[ii] = b[ii * t + j];
             }
             for p in 0..panels {
-                panel_col(a, b, t, k, bias, kind, p, j, &bcol, &mut tmp);
+                panel_col(a, k, bias, kind, p, &bcol, &mut tmp);
                 for m in 0..MR {
                     c[(p * MR + m) * t + j] = tmp[m];
                 }
@@ -210,7 +208,7 @@ fn sgemm_small_t(
                         bcol[ii] = b[ii * t + j];
                     }
                     for p in p0..p1 {
-                        panel_col(a, b, t, k, bias, kind, p, j, &bcol, &mut tmp);
+                        panel_col(a, k, bias, kind, p, &bcol, &mut tmp);
                         for m in 0..MR {
                             chunk[(p - p0) * MR * t + m * t + j] = tmp[m];
                         }

@@ -406,6 +406,17 @@ pub fn decode_step(w: &QwenW, x: &[f32], pos: usize, cache: &mut Vec<QwenCache>)
     rms_norm_row(&h, &w.final_norm)
 }
 
+/// Embedding lookup: ids -> [N, 1024] rows (bit-exact gather).
+pub fn embed_lookup(w: &QwenW, ids: &[i64]) -> Vec<f32> {
+    let mut out = vec![0.0f32; ids.len() * Q_HIDDEN];
+    for (s, &id) in ids.iter().enumerate() {
+        assert!((id as usize) < Q_VOCAB, "token id {id} out of range");
+        out[s * Q_HIDDEN..(s + 1) * Q_HIDDEN]
+            .copy_from_slice(&w.embed[id as usize * Q_HIDDEN..(id as usize + 1) * Q_HIDDEN]);
+    }
+    out
+}
+
 /// [`decode_step`] with default thread count (prefill threads via nth).
 pub fn prefill_default(w: &QwenW, x: &[f32], t: usize, pos0: usize, cache: &mut Vec<QwenCache>) -> Vec<f32> {
     prefill(w, x, t, pos0, cache, default_threads())

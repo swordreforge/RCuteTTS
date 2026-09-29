@@ -1,0 +1,4 @@
+Transform the text into speech output.
+text input:
+Say <|im_start|> out loud.
+<|endofprompt|>

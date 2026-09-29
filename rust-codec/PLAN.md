@@ -76,7 +76,11 @@
 6. 行主序的“整段拷贝”一律按行写循环（flat copy 只在行宽相等时成立）——stream `Hist::extend` 与两次测试脚手架同坑三犯。
 7. sgemm 语义：bias 按输出行全列折叠，任何“只加一次”的优化先证语义不变。
 
-## 7. 流式（M17，本轮）
+## 7. 流式（M17）
 
 `src/stream.rs`：显式 history 状态机（零 monkey-patch），conv 走 `valid_conv1d`（history 必须精确 (k-1)*d），转置走 GEMM 分解 + 行切片 `[s..]`。`tests/stream.rs`：2 帧 chunk（AR patch 尺寸）worst 3.5e-7，奇数 chunk 3/5/7 全过，e2e 真实轨迹 1.2e-6，单 chunk vs offline 1.3e-7（近 bit-identical，符合设计）。首包（2 帧）：109→71ms（小-T GEMV 路，T<8 微内核永不点火，改按行向量化）。
 破案：①`cv()` 自带因果 pad，传 extended 进去等于 pad 两次——加无 pad 的 `valid_conv1d`；②`Hist::extend` flat-copy 行错位（生产代码真 bug，同类第三次）；③small-T 路 bias 只加 j=0 列，违 sgemm 语义（19 vs 20 差的正好是 bias）。教训见 §6.6/6.7。
+
+## 8. 推理 CLI（M18，本轮）
+
+`src/bin/cutetts.rs`：tokenize → embed → prefill → AR 环 → VAE → wav，零 Python。`src/tok.rs`（sentencepiece crate + 三特殊串先切后 encode，4 文本 id-for-id 精确命中——tricky 证明整串 encode 上下文相关）；`qwen.embed_lookup` 按位 exact；自研 xorshift+Box-Muller RNG（mean -0.0004/var 0.9994，有单测锁死——第一版 uniform 写成 [1,2) 全 NaN 跑 750 步，教训：RNG 上线前必须先过分布测试）。实测：权重 1.4s，prefill 0.09s，AR 41ms/步，e2e 文本 12 步停（torch 13 步）1.92s 音频共 2.2s；同 seed 按位确定；中文同 pathway 过。完整波形不对 torch 比（x0 不同即混沌分叉，M15 已证）——正确性由 teacher-forced 环担保，CLI 只担保确定性 + 分布 + stop  sane。
