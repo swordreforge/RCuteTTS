@@ -95,6 +95,54 @@ fn base_euler_cfg_replay() {
 }
 
 #[test]
+fn base_predict_speaker_adaln() {
+    // clone branch: cond row runs adaln(spk); validates the adaln path
+    // against torch with a real-shaped [256] embedding.
+    let wpath = match base_weights() {
+        Some(p) => p,
+        None => return,
+    };
+    let w = load_dit_weights(&wpath);
+    let x = load_vec("base_spk_x");
+    let z = load_vec("base_spk_z");
+    let cond = load_vec("base_spk_cond");
+    let spk = load_vec("base_spk_spk");
+    let refr = load_vec("base_spk_out");
+    assert_eq!((x.len(), z.len(), cond.len(), spk.len(), refr.len()), (128, 1024, 128, 256, 128));
+    let v = predict(&w, &x, 0.3, &z, &cond, 0.0, Some(&spk), 0.0, 1);
+    let e = max_err(&v, &refr);
+    println!("base_spk: err={e:.2e}");
+    assert!(e < 1e-4, "base_spk {e:.2e}");
+    println!("BASE speaker-adaln gate passed");
+}
+
+#[test]
+fn base_euler_cfg_speaker_branches() {
+    // full 10-step sway euler: cond branch adaln(spk), uncond branch
+    // adaln(zeros) computed explicitly (torch feeds the zeros row through
+    // the bias-less speaker_adaln, NOT the plain path).
+    let wpath = match base_weights() {
+        Some(p) => p,
+        None => return,
+    };
+    let w = load_dit_weights(&wpath);
+    let nth = cutetts_codec::conv::default_threads();
+    let zc = load_vec("base_ss_zc");
+    let zu = load_vec("base_ss_zu");
+    let cond = load_vec("base_ss_cond");
+    let uncond = load_vec("base_ss_uncond");
+    let spk = load_vec("base_ss_spk");
+    let x0 = load_vec("base_ss_x0");
+    let refr = load_vec("base_ss_out");
+    let t0 = std::time::Instant::now();
+    let got = euler_sample_cfg(&w, &x0, &zc, &zu, &cond, &uncond, Some(&spk), 10, -0.8, 2.0, nth);
+    let e = max_err(&got, &refr);
+    println!("base_ss: err={e:.2e} ({:.2}s)", t0.elapsed().as_secs_f32());
+    assert!(e < 5e-4, "base_ss {e:.2e}");
+    println!("BASE euler-CFG-speaker gate passed");
+}
+
+#[test]
 fn base_prefixes_exact() {
     // cond = full tts prompt (text rows bitwise), uncond = suffix token only.
     let wpath = match base_weights() {

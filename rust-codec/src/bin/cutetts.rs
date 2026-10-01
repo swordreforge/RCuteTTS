@@ -361,8 +361,9 @@ fn synth_one(
     say!(pipe_log, "prefill T={tpre}: {:.2}s", t0.elapsed().as_secs_f32());
 
     // Base dual branch: uncond = suffix token only, own cache + positions,
-    // same acoustic feedback as cond (generation.py:1022/1046-1071).
-    // tts only (base voice_clone deferred — caller rejects it).
+    // same acoustic feedback as cond (generation.py:1022/1046-1071). For
+    // voice_clone, the conditional prefix carries reference features and
+    // speaker; the LM-unconditional prefix remains suffix-only.
     struct Uncond {
         cache: Vec<QwenCache>,
         last: Vec<f32>,
@@ -633,15 +634,17 @@ fn main() {
         if !(sway >= -1.0 && sway <= 2.0 / (std::f32::consts::PI - 2.0)) {
             err("--sway outside valid domain [-1, 1.752]");
         }
-        if mode == "voice_clone" {
-            err("base voice_clone is not wired yet (tts only in this pass)");
-        }
     }
     say!(pipe, "variant={variant} diffusion-steps={diff_steps} cfg={cfg_strength} sway={sway}");
     for p in [
         root.join("tokenizer/tokenizer.model"),
         root.join("weights/tts/model.safetensors"),
         root.join("weights/audio_vae/model.safetensors"),
+        if mode == "voice_clone" {
+            root.join("weights/speaker_encoder/model.safetensors")
+        } else {
+            root.join("weights/tts/model.safetensors")
+        },
     ] {
         if !p.is_file() {
             err(&format!("model file missing: {} (--model-dir={model_dir})", p.display()));

@@ -244,8 +244,9 @@ pub fn peak_guard(audio: &[f32], ceiling: f32) -> Vec<f32> {
 #[derive(Debug, PartialEq)]
 pub enum Stability {
     Ok,
-    /// near-silent patch mid-utterance (stall/skip hole, e.g. base_s123
-    /// patches 5-6 at 0.00/0.00)
+    /// near-silent patch with speech on BOTH sides (stall/skip hole, e.g.
+    /// base_s123 patches 5-6 at 0.00/0.00 followed by resumed speech).
+    /// Pure trailing silence is NOT a hole (trim cuts it; see below).
     Hole(usize),
     /// last patch still hot (early-cut ending, e.g. base_en42 ending 0.08
     /// vs natural taper ~0.02)
@@ -254,7 +255,9 @@ pub enum Stability {
 
 /// Stability gate for P2 auto-retry. Thresholds calibrated on 3 base
 /// samples; exposed as CLI args for ear recalibration.
-/// `hole`: mean-abs below this on any patch before the last two → Hole.
+/// `hole`: mean-abs below this on any patch strictly before the last
+/// speech patch → Hole. A trailing silent run (content ended, stop lagged)
+/// is Ok — the offline trim stage cuts it to 0.25s.
 /// `tail`: last-patch mean-abs above this → AbruptEnd.
 pub fn stability(wav: &[f32], hole: f32, tail: f32) -> Stability {
     const PATCH: usize = 3840;
@@ -266,7 +269,19 @@ pub fn stability(wav: &[f32], hole: f32, tail: f32) -> Stability {
         let s = &wav[i * PATCH..(i + 1) * PATCH];
         s.iter().map(|v| v.abs()).sum::<f32>() / PATCH as f32
     };
-    for i in 0..n.saturating_sub(2) {
+    // last patch containing speech; trailing run is stop lag, not a hole
+    let mut last_speech = None;
+    for i in (0..n).rev() {
+        if mean(i) >= hole {
+            last_speech = Some(i);
+            break;
+        }
+    }
+    let ls = match last_speech {
+        None => return Stability::Hole(0), // all silence: nothing to keep
+        Some(i) => i,
+    };
+    for i in 0..ls {
         if mean(i) < hole {
             return Stability::Hole(i);
         }

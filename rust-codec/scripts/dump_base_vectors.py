@@ -124,6 +124,37 @@ def main() -> None:
         uemb, _, _ = model.runtime.model.prepare_input_embeds(useg, lm_speaker_embedding=None)
     save("base_cond_prefix", cemb[0])
     save("base_uncond_prefix", uemb[0])
+    # E. speaker-adaln path (clone): unit _predict with real ECAPA emb rows
+    # [spk; zeros] + full 10-step sway euler with per-branch speaker.
+    with torch.no_grad():
+        spk = torch.randn(1, 256)
+        zeros = torch.zeros(1, 256)
+        torch.manual_seed(700)
+        x = torch.randn(1, 2, 64)
+        t = torch.full((1,), 0.3)
+        z = torch.randn(1, 1024)
+        cond = torch.randn(1, 2, 64)
+        v = head._predict(x, t, z, cond, speaker_embedding=spk)
+        for tag, ten in [("x", x), ("z", z), ("cond", cond), ("spk", spk), ("out", v)]:
+            save(f"base_spk_{tag}", ten)
+        torch.manual_seed(701)
+        zc = torch.randn(1, 1024)
+        zu = torch.randn(1, 1024)
+        cond = torch.randn(1, 2, 64)
+        uncond = torch.randn(1, 2, 64)
+        spk = torch.randn(1, 256)
+        x0 = torch.randn(1, 2, 64)
+        x = x0.clone()
+        for step in range(10):
+            t = torch.full((1,), times[step].item())
+            vc = head._predict(x, t, zc, cond, speaker_embedding=spk, validate_conditions=False)
+            vu = head._predict(x, t, zu, uncond, speaker_embedding=zeros, validate_conditions=False)
+            v = vc + 2.0 * (vc - vu)
+            dt = times[step + 1] - times[step]
+            x = x + v * dt
+        for tag, ten in [("zc", zc), ("zu", zu), ("cond", cond), ("uncond", uncond),
+                         ("spk", spk), ("x0", x0), ("out", x)]:
+            save(f"base_ss_{tag}", ten)
     print("done ->", OUT)
 
 

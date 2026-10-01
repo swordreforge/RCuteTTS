@@ -171,3 +171,15 @@
   阈值 `--hole-thresh/--tail-thresh` 可调；`--retries N` 逐包 seed+attempt 重试，
   首个通过即收留，全挂保留末次；retries=0 保持 bit-identical；与 --stream 互斥。
 - 验证：seed 123 attempt0 Hole(5) 拒收 → seed 124 收敛 0.02→0.01 收留。
+
+## 22. Base voice_clone wired (P1 continued)
+- Uncond branch in clone is suffix-only (plan.unconditional has no reference);
+  DiT uncond speaker row is zeros through bias-less adaln (exact zeros, NOT
+  the plain path) — replicated op-for-op with explicit zero adalns in
+  euler_sample_cfg (spk=None keeps both branches plain, tts behavior kept).
+- Stability gate fix: Hole now requires resumed speech after the silence
+  (pure trailing runs = stop lag, trim's job). First base-clone smoke run
+  false-fired Hole(9) on an 11-patch trailing run; fixed + regression test.
+- Gates: base _predict+adaln 6.1e-6, full euler-CFG-speaker 1.1e-5, clone
+  teacher-forced DiT-CFG 2.4e-4 / wav 1.8e-5 / stops 60-60, true-ring loc
+  3.2e-2. CLI smoke: base clone 20 steps, 3.20s, RTF 1.14.

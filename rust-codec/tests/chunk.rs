@@ -240,6 +240,12 @@ fn stability_hole_and_tail() {
     // hot ending (en42 signature)
     let hot = speech(3840 * 5, 0.2);
     assert!(matches!(stability(&hot, 0.005, 0.05), Stability::AbruptEnd(_)));
+    // trailing silence run (stop lag, trim's job) is NOT a hole
+    let mut trailed = speech(3840 * 4, 0.2);
+    trailed.extend(vec![0.0; 3840 * 6]);
+    assert_eq!(stability(&trailed, 0.005, 0.05), Stability::Ok);
+    // all silence: nothing to keep
+    assert_eq!(stability(&vec![0.0; 3840 * 4], 0.005, 0.05), Stability::Hole(0));
     // too short: no veto
     assert_eq!(stability(&[0.0; 100], 0.005, 0.05), Stability::Ok);
     println!("CHUNK gates passed");

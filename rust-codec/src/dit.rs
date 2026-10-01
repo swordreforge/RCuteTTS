@@ -623,6 +623,15 @@ pub fn euler_sample_cfg(
     assert_eq!(x0.len(), PATCH * LATENT);
     assert!(cfg > 0.0, "cfg=0 is the distill single-branch path");
     let sc = sample_prologue(w, spk, 1.0 / steps as f32, cfg, nth);
+    // Uncond branch speaker: torch feeds the zeros row through speaker_adaln
+    // (bias-less → exact zeros → full modulate math, NOT the plain path).
+    // Replicate op-for-op with explicit zeros; spk=None keeps both plain.
+    let sc_uncond = SampleCond {
+        dt_emb: sc.dt_emb.clone(),
+        step_emb: sc.step_emb.clone(),
+        cfg_emb: sc.cfg_emb.clone(),
+        adalns: spk.map(|_| w.layers.iter().map(|_| vec![0.0f32; 6 * HIDDEN]).collect()),
+    };
     let times = sway_timesteps(steps, coeff);
     let (cos, sin) = rope_tables_for(SEQ);
     let mut x = x0.to_vec();
@@ -630,7 +639,7 @@ pub fn euler_sample_cfg(
         let t = times[s];
         let dt = times[s + 1] - times[s];
         let vc = predict_cached(w, &x, t, z_cond, cond, &sc, nth, &cos, &sin);
-        let vu = predict_cached(w, &x, t, z_uncond, uncond, &sc, nth, &cos, &sin);
+        let vu = predict_cached(w, &x, t, z_uncond, uncond, &sc_uncond, nth, &cos, &sin);
         for i in 0..x.len() {
             x[i] += (vc[i] + cfg * (vc[i] - vu[i])) * dt;
         }
