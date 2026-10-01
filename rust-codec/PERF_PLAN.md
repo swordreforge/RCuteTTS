@@ -144,3 +144,35 @@ Stage 0 phase-split 实测（`--profile-steps`，"Hello world..."，seed 42）�
 - LM/VAE/LocEnc 精度（Stage 1 后看占比再议，不预立项）。
 - 跨包韵律记忆、base 长文分包策略（功能线，与本计划正交）。
 - Windows/ARM 移植（x86_64 AVX2 基线不变，非 x86 走 scalar 回退）。
+
+## 7. Stage 1  kill 记录（in-kernel bf16，门禁4 未过，关闭）
+
+- 实现过：bf16 panels + in-loop zero-extend（micro_8x8_bf16，permutevar
+  splat）+ GEMV 路径（run_gemv8b）+ `PackedW` enum + `--dit-prec`，
+  约 620 行，未合入即切除（Fehlschlag dokumentiert, Code entfernt）。
+- 实测（base 短句同 seed）：
+  - fp32 micro：DiT 159.8 ms/sample；
+  - bf16 micro：202.6 ms（**更慢**）；
+  - bf16 GEMV 路径（t≤8 改道）：508 ms（面板 8 次重读，大败）。
+- 根因：8x8 outer-product 要求一侧 splat；fp32 用内存 broadcast
+  （load 端口），bf16 须先转寄存器再 permute splat（shuffle 端口串行，
+  8 cycles/ii 打底，FMA 端口挨饿）。P 核钉死复测依然更慢——非 E 核锅。
+  门禁0 的"零 core 开销"假设错了，流量减半的 87 ms 被 shuffle 多出的
+  ~120 ms 吃掉还倒贴。
+- 质量侧（供参考，不作为关闭依据）：sgemm 相对 1.4e-3，predict 3.9e-3，
+  4 步 euler 5.8e-3，10 步 CFG（含 `vc-vu` ×3 放大）2.3e-2；
+  teacher-forced wav RMS 1.2~1.7e-3（-37dB），stop 序列全程精确——
+  **慢是唯一的死因**，数值本可接受。
+- 重开本路线的唯一路径：AMX-BF16 tile 核（155H 有 AMX，1 TFLOPS+ 级，
+  但 tile 配置/信号抢占/回退链是 Stage-2 量级工程），或换一台
+  shuffle 不瓶颈的机器重测 gate-4。
+
+## 8. 新 gate-0 候选：CFG 双分支面板融合（未动手，先量）
+
+- 动机：DiT 20 predicts/步里 cond/uncond 分支是同一权重先后各扫一遍
+  （5.6GB 中的一半是重复流量）；面板级融合（同一 panel 一次读出、
+  双分支各算各的）可省 ~40% DiT 流量，**不碰精度**（每分支 op 序不变
+  → 可逐位验证）。
+- 动手前先量：确认双分支权重重读确实各走一次 DRAM（解析上是，perf
+  抽查 cache-miss 趋势），再估融合后的 panel 常驻可行性。
+- 杀线：融合版与现版逐位一致 + 实测步进 -25%，否则关闭。
