@@ -101,6 +101,8 @@ options:
   --stream               stream PCM to the wav per AR step (first packet
                          right after prefill + 1 step; raw concat, no
                          trim/pad/crossfade — test mode)
+  --no-fusion            disable CFG panel fusion in base DiT (debug escape;
+                         fused is bitwise identical, on by default)
   --profile-steps        per-AR-step phase split (dit/locenc/lm/vae p50/p99,
                          Stage 0 instrument; zero behavioral impact)
   --retries N            default 0 (single attempt, bit-identical replay).
@@ -367,6 +369,7 @@ fn synth_one(
     base: Option<&BaseCfg>,
     cfg_w: f32,
     profile: bool,
+    fused_cfg: bool,
 ) -> (Vec<f32>, usize) {
     let t00 = Instant::now();
     // Prefix. tts: text only; clone: full reference chain.
@@ -440,10 +443,17 @@ fn synth_one(
             let out = match base {
                 Some(bc) => {
                     let u = uncond.as_ref().unwrap();
-                    let p = cutetts_codec::dit::euler_sample_cfg(
-                        &w.dit, &x0, &last, &u.last, &cond, &u.prev,
-                        spk_opt.as_deref(), bc.steps, bc.sway, bc.cfg, nth,
-                    );
+                    let p = if fused_cfg {
+                        cutetts_codec::dit::euler_sample_cfg_fused(
+                            &w.dit, &x0, &last, &u.last, &cond, &u.prev,
+                            spk_opt.as_deref(), bc.steps, bc.sway, bc.cfg, nth,
+                        )
+                    } else {
+                        cutetts_codec::dit::euler_sample_cfg(
+                            &w.dit, &x0, &last, &u.last, &cond, &u.prev,
+                            spk_opt.as_deref(), bc.steps, bc.sway, bc.cfg, nth,
+                        )
+                    };
                     let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
                     (p, s)
                 }
@@ -821,7 +831,7 @@ fn main() {
             loop {
                 let cs_try = cs.wrapping_add(attempt as u64);
                 let (w, s) = synth_one(&w, &tok, piece, cs_try, max_steps, nth, clone_ctx.as_ref(), sink_opt.as_mut(), pipe,
-                    if variant == "base" { Some(&bc) } else { None }, cfg_strength, profiling);
+                    if variant == "base" { Some(&bc) } else { None }, cfg_strength, profiling, !has_flag(&args, "--no-fusion"));
                 match cutetts_codec::chunk::stability(&w, hole_thresh, tail_thresh) {
                     cutetts_codec::chunk::Stability::Ok => {
                         if attempt > 0 {

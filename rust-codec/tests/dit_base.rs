@@ -171,3 +171,54 @@ fn base_prefixes_exact() {
     assert!(eu == 0.0, "uncond row must be bitwise");
     println!("BASE prefix gate passed");
 }
+
+#[test]
+fn base_euler_fused_bitwise() {
+    // CFG panel fusion gate: fused must be BITWISE equal to unfused
+    // (same kernels, same per-branch op order — shared panels only change
+    // cache residency, never arithmetic). Covers plain (tts) and adaln
+    // (clone cond + zeros uncond) branches, with bench timings.
+    use cutetts_codec::dit::euler_sample_cfg_fused;
+    let wpath = match base_weights() {
+        Some(p) => p,
+        None => return,
+    };
+    let w = load_dit_weights(&wpath);
+    let nth = cutetts_codec::conv::default_threads();
+    // plain branches (tts)
+    for i in 0..2 {
+        let zc = load_vec(&format!("base_s{i:02}_zc"));
+        let zu = load_vec(&format!("base_s{i:02}_zu"));
+        let cond = load_vec(&format!("base_s{i:02}_cond"));
+        let uncond = load_vec(&format!("base_s{i:02}_uncond"));
+        let x0 = load_vec(&format!("base_s{i:02}_x0"));
+        let t0 = std::time::Instant::now();
+        let a = euler_sample_cfg(&w, &x0, &zc, &zu, &cond, &uncond, None, 10, -0.8, 2.0, nth);
+        let ta = t0.elapsed().as_secs_f32();
+        let t0 = std::time::Instant::now();
+        let b = euler_sample_cfg_fused(&w, &x0, &zc, &zu, &cond, &uncond, None, 10, -0.8, 2.0, nth);
+        let tb = t0.elapsed().as_secs_f32();
+        assert_eq!(a.len(), b.len());
+        assert!(a == b, "fused/plain mismatch s{i:02}");
+        println!("fused/plain s{i:02}: bitwise equal, unfused={ta:.3}s fused={tb:.3}s (x{:.2})", ta / tb.max(1e-9));
+    }
+    // adaln branches (clone): cond adaln(spk), uncond adaln(zeros)
+    {
+        let zc = load_vec("base_ss_zc");
+        let zu = load_vec("base_ss_zu");
+        let cond = load_vec("base_ss_cond");
+        let uncond = load_vec("base_ss_uncond");
+        let spk = load_vec("base_ss_spk");
+        let x0 = load_vec("base_ss_x0");
+        let t0 = std::time::Instant::now();
+        let a = euler_sample_cfg(&w, &x0, &zc, &zu, &cond, &uncond, Some(&spk), 10, -0.8, 2.0, nth);
+        let ta = t0.elapsed().as_secs_f32();
+        let t0 = std::time::Instant::now();
+        let b = euler_sample_cfg_fused(&w, &x0, &zc, &zu, &cond, &uncond, Some(&spk), 10, -0.8, 2.0, nth);
+        let tb = t0.elapsed().as_secs_f32();
+        assert_eq!(a.len(), b.len());
+        assert!(a == b, "fused/spk mismatch");
+        println!("fused/spk: bitwise equal, unfused={ta:.3}s fused={tb:.3}s (x{:.2})", ta / tb.max(1e-9));
+    }
+    println!("FUSION bitwise gate passed");
+}

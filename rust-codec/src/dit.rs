@@ -167,7 +167,7 @@ pub fn load_dit_weights(path: &std::path::Path) -> DitW {    let bytes = std::fs
 // ============================================================
 
 use crate::conv::default_threads;
-use crate::gemm::sgemm_bias;
+use crate::gemm::{sgemm_bias, sgemm_bias_dual};
 
 const ROPE_THETA: f32 = 10000.0;
 const RMS_EPS: f32 = 1e-6;
@@ -203,6 +203,45 @@ pub(crate) fn linear_rows(x: &[f32], s: usize, l: &DitLinear, nth: usize) -> Vec
         }
     }
     out
+}
+
+/// Dual-branch [`linear_rows`]: both branches over SHARED panels in one
+/// call (CFG fusion). Per-branch math is identical to two separate calls
+/// (same kernels, same order) → bitwise equal. Returns (out_cond, out_uncond).
+pub(crate) fn linear_rows_dual(
+    xc: &[f32],
+    xu: &[f32],
+    s: usize,
+    l: &DitLinear,
+    nth: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let i = l.w.cols;
+    let o = l.out_dim;
+    assert_eq!(xc.len(), s * i);
+    assert_eq!(xu.len(), s * i);
+    const T: usize = 8;
+    let t = if s < T { T } else { s };
+    let mut xbc = vec![0.0f32; i * t];
+    let mut xbu = vec![0.0f32; i * t];
+    for ii in 0..i {
+        for ss in 0..s {
+            xbc[ii * t + ss] = xc[ss * i + ii];
+            xbu[ii * t + ss] = xu[ss * i + ii];
+        }
+    }
+    let ln = if (o as u64) * (i as u64) * (s as u64) >= 8_000_000 { nth } else { 1 };
+    let mut cc = vec![0.0f32; l.w.rows * t];
+    let mut cu = vec![0.0f32; l.w.rows * t];
+    sgemm_bias_dual(&l.w, &xbc, &xbu, t, &l.b, &mut cc, &mut cu, ln);
+    let mut outc = vec![0.0f32; s * o];
+    let mut outu = vec![0.0f32; s * o];
+    for ss in 0..s {
+        for oo in 0..o {
+            outc[ss * o + oo] = cc[oo * t + ss];
+            outu[ss * o + oo] = cu[oo * t + ss];
+        }
+    }
+    (outc, outu)
 }
 
 pub(crate) fn rms_norm_row(x: &[f32], w: &[f32]) -> Vec<f32> {
@@ -395,6 +434,219 @@ fn dit_layer(h: &mut [f32], lw: &DitLayerW, ad: Option<&[f32]>, nth: usize, cos:
     }
 }
 
+/// Dual-branch [`dit_layer`]: both branches' linears share panels via
+/// [`linear_rows_dual`]; attention/norm/modulate run per branch (activation
+/// only, bitwise identical to two single calls). ad: per-branch adaln.
+fn dit_layer_dual(
+    hc: &mut [f32],
+    hu: &mut [f32],
+    lw: &DitLayerW,
+    adc: Option<&[f32]>,
+    adu: Option<&[f32]>,
+    nth: usize,
+    cos: &[f32],
+    sin: &[f32],
+) {
+    let (sh_ac, sc_ac, ga_ac, sh_mc, sc_mc, ga_mc) = match adc {
+        Some(ad) => {
+            assert_eq!(ad.len(), 6 * HIDDEN);
+            let (sh_a, rest) = ad.split_at(HIDDEN);
+            let (sc_a, rest) = rest.split_at(HIDDEN);
+            let (ga_a, rest) = rest.split_at(HIDDEN);
+            let (sh_m, rest) = rest.split_at(HIDDEN);
+            let (sc_m, rest) = rest.split_at(HIDDEN);
+            let (ga_m, _) = rest.split_at(HIDDEN);
+            (sh_a, sc_a, ga_a, sh_m, sc_m, ga_m)
+        }
+        None => (&[][..], &[][..], &[][..], &[][..], &[][..], &[][..]),
+    };
+    let (sh_au, sc_au, ga_au, sh_mu, sc_mu, ga_mu) = match adu {
+        Some(ad) => {
+            assert_eq!(ad.len(), 6 * HIDDEN);
+            let (sh_a, rest) = ad.split_at(HIDDEN);
+            let (sc_a, rest) = rest.split_at(HIDDEN);
+            let (ga_a, rest) = rest.split_at(HIDDEN);
+            let (sh_m, rest) = rest.split_at(HIDDEN);
+            let (sc_m, rest) = rest.split_at(HIDDEN);
+            let (ga_m, _) = rest.split_at(HIDDEN);
+            (sh_a, sc_a, ga_a, sh_m, sc_m, ga_m)
+        }
+        None => (&[][..], &[][..], &[][..], &[][..], &[][..], &[][..]),
+    };
+    let has_c = adc.is_some();
+    let has_u = adu.is_some();
+    let modulate = |normed: &[f32], sh: &[f32], sc: &[f32], has: bool| -> Vec<f32> {
+        if !has {
+            return normed.to_vec();
+        }
+        normed.iter().enumerate().map(|(d, &v)| v * (1.0 + sc[d]) + sh[d]).collect()
+    };
+    let gate_scale = |g: &[f32], has: bool| -> Vec<f32> {
+        if !has {
+            return vec![1.0; HIDDEN];
+        }
+        g.iter().map(|&v| 1.0 + v).collect()
+    };
+
+    // --- attention block, per branch ---
+    let mut normed_c = vec![0.0f32; SEQ * HIDDEN];
+    let mut normed_u = vec![0.0f32; SEQ * HIDDEN];
+    for s in 0..SEQ {
+        let n = rms_norm_row(&hc[s * HIDDEN..(s + 1) * HIDDEN], &lw.norm1);
+        let m = modulate(&n, sh_ac, sc_ac, has_c);
+        normed_c[s * HIDDEN..(s + 1) * HIDDEN].copy_from_slice(&m);
+        let n = rms_norm_row(&hu[s * HIDDEN..(s + 1) * HIDDEN], &lw.norm1);
+        let m = modulate(&n, sh_au, sc_au, has_u);
+        normed_u[s * HIDDEN..(s + 1) * HIDDEN].copy_from_slice(&m);
+    }
+    let (q_c, q_u) = linear_rows_dual(&normed_c, &normed_u, SEQ, &lw.q, nth);
+    let (k_c, k_u) = linear_rows_dual(&normed_c, &normed_u, SEQ, &lw.k, nth);
+    let (v_c, v_u) = linear_rows_dual(&normed_c, &normed_u, SEQ, &lw.v, nth);
+    let mut attn_out_c = vec![0.0f32; SEQ * HIDDEN];
+    let mut attn_out_u = vec![0.0f32; SEQ * HIDDEN];
+    // identical per-branch attention math as dit_layer (rope/scores/mix)
+    for (qq, kk, vv, out) in [(&q_c, &k_c, &v_c, &mut attn_out_c), (&q_u, &k_u, &v_u, &mut attn_out_u)] {
+        let mut scores = [0.0f32; SEQ * SEQ];
+        let mut vvv = [0.0f32; HEAD_DIM];
+        for hh in 0..N_HEADS {
+            let kh = hh / (N_HEADS / N_KV);
+            let mut qr = [[0.0f32; HEAD_DIM]; SEQ];
+            let mut kr = [[0.0f32; HEAD_DIM]; SEQ];
+            for s in 0..SEQ {
+                let mut qv = [0.0f32; HEAD_DIM];
+                let mut kv = [0.0f32; HEAD_DIM];
+                for d in 0..HEAD_DIM {
+                    qv[d] = qq[s * HIDDEN + hh * HEAD_DIM + d];
+                    kv[d] = kk[s * (N_KV * HEAD_DIM) + kh * HEAD_DIM + d];
+                }
+                qr[s] = rope_apply(&qv, s, cos, sin).try_into().unwrap();
+                kr[s] = rope_apply(&kv, s, cos, sin).try_into().unwrap();
+            }
+            for i in 0..SEQ {
+                for j in 0..SEQ {
+                    let mut s = 0.0f32;
+                    for d in 0..HEAD_DIM {
+                        s += qr[i][d] * kr[j][d];
+                    }
+                    scores[i * SEQ + j] = s * ATTN_SCALE;
+                }
+                softmax_row(&mut scores[i * SEQ..(i + 1) * SEQ]);
+            }
+            for i in 0..SEQ {
+                for d in 0..HEAD_DIM {
+                    vvv[d] = 0.0;
+                }
+                for j in 0..SEQ {
+                    let p = scores[i * SEQ + j];
+                    for d in 0..HEAD_DIM {
+                        vvv[d] += p * vv[j * (N_KV * HEAD_DIM) + kh * HEAD_DIM + d];
+                    }
+                }
+                for d in 0..HEAD_DIM {
+                    out[i * HIDDEN + hh * HEAD_DIM + d] = vvv[d];
+                }
+            }
+        }
+    }
+    let (attn_proj_c, attn_proj_u) = linear_rows_dual(&attn_out_c, &attn_out_u, SEQ, &lw.o, nth);
+    let ga_c = gate_scale(ga_ac, has_c);
+    let ga_u = gate_scale(ga_au, has_u);
+    for s in 0..SEQ {
+        for d in 0..HIDDEN {
+            hc[s * HIDDEN + d] += ga_c[d] * attn_proj_c[s * HIDDEN + d];
+            hu[s * HIDDEN + d] += ga_u[d] * attn_proj_u[s * HIDDEN + d];
+        }
+    }
+
+    // --- mlp block, per branch ---
+    let mut normed2_c = vec![0.0f32; SEQ * HIDDEN];
+    let mut normed2_u = vec![0.0f32; SEQ * HIDDEN];
+    for s in 0..SEQ {
+        let n = rms_norm_row(&hc[s * HIDDEN..(s + 1) * HIDDEN], &lw.norm2);
+        let m = modulate(&n, sh_mc, sc_mc, has_c);
+        normed2_c[s * HIDDEN..(s + 1) * HIDDEN].copy_from_slice(&m);
+        let n = rms_norm_row(&hu[s * HIDDEN..(s + 1) * HIDDEN], &lw.norm2);
+        let m = modulate(&n, sh_mu, sc_mu, has_u);
+        normed2_u[s * HIDDEN..(s + 1) * HIDDEN].copy_from_slice(&m);
+    }
+    let (gate_c, gate_u) = linear_rows_dual(&normed2_c, &normed2_u, SEQ, &lw.mlp.gate, nth);
+    let (up_c, up_u) = linear_rows_dual(&normed2_c, &normed2_u, SEQ, &lw.mlp.up, nth);
+    let mut act_c = vec![0.0f32; SEQ * FFN];
+    let mut act_u = vec![0.0f32; SEQ * FFN];
+    for i in 0..act_c.len() {
+        let g = gate_c[i] / (1.0 + (-gate_c[i]).exp());
+        act_c[i] = g * up_c[i];
+        let g = gate_u[i] / (1.0 + (-gate_u[i]).exp());
+        act_u[i] = g * up_u[i];
+    }
+    let (down_c, down_u) = linear_rows_dual(&act_c, &act_u, SEQ, &lw.mlp.down, nth);
+    let gm_c = gate_scale(ga_mc, has_c);
+    let gm_u = gate_scale(ga_mu, has_u);
+    for s in 0..SEQ {
+        for d in 0..HIDDEN {
+            hc[s * HIDDEN + d] += gm_c[d] * down_c[s * HIDDEN + d];
+            hu[s * HIDDEN + d] += gm_u[d] * down_u[s * HIDDEN + d];
+        }
+    }
+}
+
+/// Dual-branch [`predict_cached`]: t_emb computed ONCE (same t/weights for
+/// both branches — bitwise identical to computing twice); mu/seq/attention
+/// per branch; linears fused. Returns (v_cond, v_uncond).
+fn predict_cached_dual(
+    w: &DitW,
+    xc: &[f32],
+    xu: &[f32],
+    t: f32,
+    zc: &[f32],
+    zu: &[f32],
+    cond: &[f32],
+    uncond: &[f32],
+    sc: &SampleCond,
+    su: &SampleCond,
+    nth: usize,
+    cos: &[f32],
+    sin: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
+    let (xh_c, xh_u) = linear_rows_dual(xc, xu, PATCH, &w.in_proj, nth);
+    let (ch_c, ch_u) = linear_rows_dual(cond, uncond, PATCH, &w.cond_proj, nth);
+    let t_emb = time_mlp(&sin_emb(t), &w.time_mlp1, &w.time_mlp2, nth);
+    let mut mu_c = vec![0.0f32; HIDDEN];
+    let mut mu_u = vec![0.0f32; HIDDEN];
+    for d in 0..HIDDEN {
+        mu_c[d] = zc[d] + t_emb[d] + sc.dt_emb[d] + sc.step_emb[d] + sc.cfg_emb[d];
+        mu_u[d] = zu[d] + t_emb[d] + su.dt_emb[d] + su.step_emb[d] + su.cfg_emb[d];
+    }
+    let mut seq_c = vec![0.0f32; SEQ * HIDDEN];
+    let mut seq_u = vec![0.0f32; SEQ * HIDDEN];
+    seq_c[..HIDDEN].copy_from_slice(&mu_c);
+    seq_c[HIDDEN..3 * HIDDEN].copy_from_slice(&ch_c);
+    seq_c[3 * HIDDEN..].copy_from_slice(&xh_c);
+    seq_u[..HIDDEN].copy_from_slice(&mu_u);
+    seq_u[HIDDEN..3 * HIDDEN].copy_from_slice(&ch_u);
+    seq_u[3 * HIDDEN..].copy_from_slice(&xh_u);
+    match (&sc.adalns, &su.adalns) {
+        (Some(ac), Some(au)) => {
+            for ((lw, a), b) in w.layers.iter().zip(ac.iter()).zip(au.iter()) {
+                dit_layer_dual(&mut seq_c, &mut seq_u, lw, Some(a), Some(b), nth, cos, sin);
+            }
+        }
+        (None, None) => {
+            for lw in &w.layers {
+                dit_layer_dual(&mut seq_c, &mut seq_u, lw, None, None, nth, cos, sin);
+            }
+        }
+        _ => panic!("cond/uncond adaln presence must match"),
+    }
+    for s in 0..SEQ {
+        let n = rms_norm_row(&seq_c[s * HIDDEN..(s + 1) * HIDDEN], &w.final_norm);
+        seq_c[s * HIDDEN..(s + 1) * HIDDEN].copy_from_slice(&n);
+        let n = rms_norm_row(&seq_u[s * HIDDEN..(s + 1) * HIDDEN], &w.final_norm);
+        seq_u[s * HIDDEN..(s + 1) * HIDDEN].copy_from_slice(&n);
+    }
+    let (oc, ou) = linear_rows_dual(&seq_c[3 * HIDDEN..], &seq_u[3 * HIDDEN..], PATCH, &w.out_proj, nth);
+    (oc, ou)
+}
 /// TimestepEmbedding: Linear -> SiLU -> Linear (bias=True).
 fn time_mlp(x: &[f32], l1: &DitLinear, l2: &DitLinear, nth: usize) -> Vec<f32> {
     let h = linear_rows(x, 1, l1, nth);
@@ -640,6 +892,48 @@ pub fn euler_sample_cfg(
         let dt = times[s + 1] - times[s];
         let vc = predict_cached(w, &x, t, z_cond, cond, &sc, nth, &cos, &sin);
         let vu = predict_cached(w, &x, t, z_uncond, uncond, &sc_uncond, nth, &cos, &sin);
+        for i in 0..x.len() {
+            x[i] += (vc[i] + cfg * (vc[i] - vu[i])) * dt;
+        }
+    }
+    x
+}
+
+/// Fused dual-branch [`euler_sample_cfg`]: panel-level CFG fusion — both
+/// branches computed per panel while weights are hot (gate-0 ratio 2.04).
+/// Same signature; bitwise-equal output gated in tests (unfused kept as the
+/// oracle, same as scalar kernels).
+pub fn euler_sample_cfg_fused(
+    w: &DitW,
+    x0: &[f32],
+    z_cond: &[f32],
+    z_uncond: &[f32],
+    cond: &[f32],
+    uncond: &[f32],
+    spk: Option<&[f32]>,
+    steps: usize,
+    coeff: f32,
+    cfg: f32,
+    nth: usize,
+) -> Vec<f32> {
+    assert_eq!(x0.len(), PATCH * LATENT);
+    assert!(cfg > 0.0, "cfg=0 is the distill single-branch path");
+    let sc = sample_prologue(w, spk, 1.0 / steps as f32, cfg, nth);
+    let sc_uncond = SampleCond {
+        dt_emb: sc.dt_emb.clone(),
+        step_emb: sc.step_emb.clone(),
+        cfg_emb: sc.cfg_emb.clone(),
+        adalns: spk.map(|_| w.layers.iter().map(|_| vec![0.0f32; 6 * HIDDEN]).collect()),
+    };
+    let times = sway_timesteps(steps, coeff);
+    let (cos, sin) = rope_tables_for(SEQ);
+    let mut x = x0.to_vec();
+    for s in 0..steps {
+        let t = times[s];
+        let dt = times[s + 1] - times[s];
+        let (vc, vu) = predict_cached_dual(
+            w, &x, &x, t, z_cond, z_uncond, cond, uncond, &sc, &sc_uncond, nth, &cos, &sin,
+        );
         for i in 0..x.len() {
             x[i] += (vc[i] + cfg * (vc[i] - vu[i])) * dt;
         }

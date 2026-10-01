@@ -181,3 +181,15 @@ Stage 0 phase-split 实测（`--profile-steps`，"Hello world..."，seed 42）�
 - 实施要点：分支循环下沉到 linear/panel 作用域（线程池切分按 panel 对
   保持），predict_cached 签名动，euler_sample_cfg 主循环改； thread
   safety 与现有 pool scope 同构。
+
+## 9. 融合落地 verdict（ paw：数字全摆，结论用户裁）
+- 逐位：test + CLI 全链路（12 步 base）bitwise equal ✓（fused/unfused 同 seed
+  wav 逐字节一致，pinned/unpinned 均验证）。
+- pinned P 核（taskset -c 0-11，12 线程）：DiT 130.9→98.4ms（-25%），
+  步进 187→152ms（-19%），RTF 1.17→**0.95（过实时线）**。
+- 默认 22 线程 unpinned：DiT 132.5 vs 138ms（parity，噪声内），RTF 1.21/1.24。
+  E 核抖动吞掉 -20% 量级收益（microbench 分布 0.87~1.26x vs pinned 1.23~1.39x）。
+- 杀线复核：-25% 步进线**默认配置下未达到**（pinned -19%）。合入理由：
+  零数值风险（逐位）+ 条件明确的速度（pinned -25% DiT，RTF 过线）+
+  一 flag 可逆（`--no-fusion`）。若按字面杀线，应 revert 本节提交——
+  请用户终裁。

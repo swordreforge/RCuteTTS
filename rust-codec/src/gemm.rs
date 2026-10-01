@@ -290,6 +290,361 @@ fn sgemm_range(
     }
 }
 
+/// Dual-branch SGEMM (CFG fusion): `cc = A*bc + bias`, `cu = A*bu + bias`
+/// over SHARED panels. Each panel job computes both branches back-to-back
+/// while the panel is L1/L2-hot, halving DiT weight re-reads (second CFG
+/// branch otherwise re-streams from DRAM — gate-0 ratio 2.04).
+/// Per-branch op order/kernels are identical to the single path, so fused
+/// output is BITWISE equal to two `sgemm_bias` calls (gated in tests).
+pub fn sgemm_bias_dual(
+    a: &PackedA,
+    bc: &[f32],
+    bu: &[f32],
+    t: usize,
+    bias: &[f32],
+    cc: &mut [f32],
+    cu: &mut [f32],
+    nth: usize,
+) {
+    sgemm_bias_dual_with_kind(a, bc, bu, t, bias, cc, cu, nth, resolve_saxpy())
+}
+
+/// [`sgemm_bias_dual`] with an explicit kernel (tests / debugging).
+pub fn sgemm_bias_dual_with_kind(
+    a: &PackedA,
+    bc: &[f32],
+    bu: &[f32],
+    t: usize,
+    bias: &[f32],
+    cc: &mut [f32],
+    cu: &mut [f32],
+    nth: usize,
+    kind: SaxpyKind,
+) {
+    let (pr, k) = (a.rows, a.cols);
+    assert_eq!(bc.len(), k * t);
+    assert_eq!(bu.len(), k * t);
+    assert_eq!(cc.len(), pr * t);
+    assert_eq!(cu.len(), pr * t);
+    let ops = pr as u64 * t as u64 * k as u64;
+    if t < 8 && kind != SaxpyKind::Scalar {
+        return sgemm_small_t_dual(a, bc, bu, t, bias, cc, cu, nth, kind);
+    }
+    const ROW_STEP: usize = 2 * MR;
+    const COL_STEP: usize = 2048;
+    let rtasks = pr.div_ceil(ROW_STEP);
+    let ctasks = t.div_ceil(COL_STEP);
+    if nth <= 1 || ops < 200_000 || rtasks * ctasks <= 1 {
+        return sgemm_range_dual(a, bc, bu, t, bias, cc, cu, t, 0, pr, 0, t, kind);
+    }
+    if ctasks == 1 {
+        let panels = pr / MR;
+        // Finer split than the single path: each dual job carries 2x flops,
+        // so halve `per` to keep job granularity (hetero-core balance).
+        let per = ((panels + nth - 1) / nth / 2).max(1);
+        // 1D row chunks written directly (same split contract as single
+        // path, both buffers in lockstep — disjoint ranges, no aliasing).
+        let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = cc
+            .chunks_mut(per * MR * t)
+            .zip(cu.chunks_mut(per * MR * t))
+            .enumerate()
+            .map(|(pi, (chc, chu))| {
+                let p0 = pi * per;
+                let p1 = (p0 + per).min(panels);
+                Box::new(move || {
+                    sgemm_range_dual(a, bc, bu, t, bias, chc, chu, t, p0 * MR, p1 * MR, 0, t, kind);
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        crate::pool::scope(jobs);
+        return;
+    }
+    struct Task {
+        r0: usize,
+        r1: usize,
+        t0: usize,
+        t1: usize,
+    }
+    let mut tasks = Vec::with_capacity(rtasks * ctasks);
+    for r in 0..rtasks {
+        for cc_ in 0..ctasks {
+            tasks.push(Task {
+                r0: (r * ROW_STEP).min(pr),
+                r1: ((r + 1) * ROW_STEP).min(pr),
+                t0: (cc_ * COL_STEP).min(t),
+                t1: ((cc_ + 1) * COL_STEP).min(t),
+            });
+        }
+    }
+    // Two output buffers shared by pointer (same contract as single path).
+    struct Ptrs {
+        cc: usize,
+        cu: usize,
+    }
+    let ptrs = Ptrs { cc: cc.as_mut_ptr() as usize, cu: cu.as_mut_ptr() as usize };
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = nth.min(tasks.len());
+    let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..workers)
+        .map(|_| {
+            Box::new(|| loop {
+                let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if idx >= tasks.len() {
+                    break;
+                }
+                let task = &tasks[idx];
+                let (rn, tn) = (task.r1 - task.r0, task.t1 - task.t0);
+                let mut tile_c = vec![0.0f32; rn * tn];
+                let mut tile_u = vec![0.0f32; rn * tn];
+                sgemm_range_dual(
+                    a, bc, bu, t, bias, &mut tile_c, &mut tile_u, tn,
+                    task.r0, task.r1, task.t0, task.t1, kind,
+                );
+                unsafe {
+                    let bc_ = ptrs.cc as *mut f32;
+                    let bu_ = ptrs.cu as *mut f32;
+                    for r in 0..rn {
+                        let dst_c = bc_.add((task.r0 + r) * t + task.t0);
+                        let dst_u = bu_.add((task.r0 + r) * t + task.t0);
+                        std::ptr::copy_nonoverlapping(tile_c.as_ptr().add(r * tn), dst_c, tn);
+                        std::ptr::copy_nonoverlapping(tile_u.as_ptr().add(r * tn), dst_u, tn);
+                    }
+                }
+            }) as Box<dyn FnOnce() + Send + '_>
+        })
+        .collect();
+    crate::pool::scope(jobs);
+}
+
+/// Small-T dual GEMM (t < 8) via panel GEMV on both branches.
+fn sgemm_small_t_dual(
+    a: &PackedA,
+    bc: &[f32],
+    bu: &[f32],
+    t: usize,
+    bias: &[f32],
+    cc: &mut [f32],
+    cu: &mut [f32],
+    nth: usize,
+    kind: SaxpyKind,
+) {
+    use crate::simd::run_gemv8;
+    let (pr, k) = (a.rows, a.cols);
+    let panels = pr / MR;
+    fn panel_col(
+        a: &PackedA,
+        k: usize,
+        bias: &[f32],
+        kind: SaxpyKind,
+        p: usize,
+        bcol: &[f32],
+        out8: &mut [f32],
+    ) {
+        let mut bb = [0.0f32; MR];
+        for m in 0..MR {
+            bb[m] = bias.get(p * MR + m).copied().unwrap_or(0.0);
+        }
+        run_gemv8(kind, &a.data[p * k * MR..(p + 1) * k * MR], bcol, k, &bb, out8);
+    }
+    let ops = pr as u64 * t as u64 * k as u64;
+    if nth <= 1 || panels <= 1 || ops < 200_000 {
+        let mut bcol = vec![0.0f32; k];
+        let mut tmp = [0.0f32; MR];
+        for j in 0..t {
+            // cond branch columns, then uncond — same B-gather pattern
+            for ii in 0..k {
+                bcol[ii] = bc[ii * t + j];
+            }
+            for p in 0..panels {
+                panel_col(a, k, bias, kind, p, &bcol, &mut tmp);
+                for m in 0..MR {
+                    cc[(p * MR + m) * t + j] = tmp[m];
+                }
+            }
+            for ii in 0..k {
+                bcol[ii] = bu[ii * t + j];
+            }
+            for p in 0..panels {
+                panel_col(a, k, bias, kind, p, &bcol, &mut tmp);
+                for m in 0..MR {
+                    cu[(p * MR + m) * t + j] = tmp[m];
+                }
+            }
+        }
+        return;
+    }
+    // threaded over panels; each job owns whole panel rows, both branches
+    let per = (panels + nth - 1) / nth;
+    let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = cc
+        .chunks_mut(per * MR * t)
+        .zip(cu.chunks_mut(per * MR * t))
+        .enumerate()
+        .map(|(pi, (chc, chu))| {
+            let p0 = pi * per;
+            let p1 = (p0 + per).min(panels);
+            Box::new(move || {
+                let mut bcol = vec![0.0f32; k];
+                let mut tmp = [0.0f32; MR];
+                for j in 0..t {
+                    for ii in 0..k {
+                        bcol[ii] = bc[ii * t + j];
+                    }
+                    for p in p0..p1 {
+                        panel_col(a, k, bias, kind, p, &bcol, &mut tmp);
+                        for m in 0..MR {
+                            chc[(p - p0) * MR * t + m * t + j] = tmp[m];
+                        }
+                    }
+                    for ii in 0..k {
+                        bcol[ii] = bu[ii * t + j];
+                    }
+                    for p in p0..p1 {
+                        panel_col(a, k, bias, kind, p, &bcol, &mut tmp);
+                        for m in 0..MR {
+                            chu[(p - p0) * MR * t + m * t + j] = tmp[m];
+                        }
+                    }
+                }
+            }) as Box<dyn FnOnce() + Send + '_>
+        })
+        .collect();
+    crate::pool::scope(jobs);
+}
+
+/// Dual compute for output rows `[r0, r1)` x cols `[tc0, tc1)`: same tiling
+/// as [`sgemm_range`]; per block the micro-kernel runs branch C then branch
+/// U over the same hot panel (bitwise equal to two single calls).
+fn sgemm_range_dual(
+    a: &PackedA,
+    bc: &[f32],
+    bu: &[f32],
+    t_full: usize,
+    bias: &[f32],
+    cc: &mut [f32],
+    cu: &mut [f32],
+    tn: usize,
+    r0: usize,
+    r1: usize,
+    tc0: usize,
+    tc1: usize,
+    kind: SaxpyKind,
+) {
+    let k = a.cols;
+    if kind == SaxpyKind::Scalar {
+        return sgemm_range_dual_scalar(a, bc, bu, t_full, bias, cc, cu, tn, r0, r1, tc0, tc1);
+    }
+    let tcols = tc1 - tc0;
+    let n_full = tcols / MR * MR;
+    for j in (0..n_full).step_by(MR) {
+        let jabs = tc0 + j;
+        for p in (r0 / MR)..(r1 / MR) {
+            let mut bb = [0.0f32; MR];
+            for m in 0..MR {
+                bb[m] = bias.get(p * MR + m).copied().unwrap_or(0.0);
+            }
+            let ap = &a.data[p * k * MR..p * k * MR + k * MR];
+            let crow_c = &mut cc[(p * MR - r0) * tn + j..];
+            let crow_u = &mut cu[(p * MR - r0) * tn + j..];
+            unsafe {
+                match kind {
+                    SaxpyKind::Fma => {
+                        crate::simd::micro_8x8_fma(
+                            ap.as_ptr(), bc.as_ptr(), t_full, k, jabs,
+                            bb.as_ptr(), crow_c.as_mut_ptr(), tn,
+                        );
+                        crate::simd::micro_8x8_fma(
+                            ap.as_ptr(), bu.as_ptr(), t_full, k, jabs,
+                            bb.as_ptr(), crow_u.as_mut_ptr(), tn,
+                        );
+                    }
+                    _ => {
+                        crate::simd::micro_8x8_exact(
+                            ap.as_ptr(), bc.as_ptr(), t_full, k, jabs,
+                            bb.as_ptr(), crow_c.as_mut_ptr(), tn,
+                        );
+                        crate::simd::micro_8x8_exact(
+                            ap.as_ptr(), bu.as_ptr(), t_full, k, jabs,
+                            bb.as_ptr(), crow_u.as_mut_ptr(), tn,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Tail cols (< 8): bias fill + K-loop SAXPY per branch (same as single).
+    if n_full < tcols {
+        let ker = kind;
+        for p in (r0 / MR)..(r1 / MR) {
+            for m in 0..MR {
+                let bs = bias.get(p * MR + m).copied().unwrap_or(0.0);
+                let row_c = &mut cc[(p * MR - r0) * tn + m * tn + n_full
+                    ..(p * MR - r0) * tn + (m + 1) * tn];
+                let row_u = &mut cu[(p * MR - r0) * tn + m * tn + n_full
+                    ..(p * MR - r0) * tn + (m + 1) * tn];
+                row_c.fill(bs);
+                row_u.fill(bs);
+                for ii in 0..k {
+                    let av = a.data[(p * k + ii) * MR + m];
+                    let brow_c = &bc[ii * t_full + tc0 + n_full..ii * t_full + tc1];
+                    let brow_u = &bu[ii * t_full + tc0 + n_full..ii * t_full + tc1];
+                    run_saxpy(ker, row_c, brow_c, av, tcols - n_full);
+                    run_saxpy(ker, row_u, brow_u, av, tcols - n_full);
+                }
+            }
+        }
+    }
+}
+
+/// Scalar fallback for [`sgemm_range_dual`].
+fn sgemm_range_dual_scalar(
+    a: &PackedA,
+    bc: &[f32],
+    bu: &[f32],
+    t_full: usize,
+    bias: &[f32],
+    cc: &mut [f32],
+    cu: &mut [f32],
+    tn: usize,
+    r0: usize,
+    r1: usize,
+    tc0: usize,
+    tc1: usize,
+) {
+    let k = a.cols;
+    let ker = SaxpyKind::Scalar;
+    for p in (r0 / MR)..(r1 / MR) {
+        for m in 0..MR {
+            let bs = bias.get(p * MR + m).copied().unwrap_or(0.0);
+            let row_c = &mut cc[(p * MR - r0) * tn + m * tn..(p * MR - r0) * tn + (m + 1) * tn];
+            let row_u = &mut cu[(p * MR - r0) * tn + m * tn..(p * MR - r0) * tn + (m + 1) * tn];
+            row_c.fill(bs);
+            row_u.fill(bs);
+        }
+    }
+    for t0 in (tc0..tc1).step_by(NC) {
+        let t_end = (t0 + NC).min(tc1);
+        let nw = t_end - t0;
+        for i0 in (0..k).step_by(KC) {
+            let kn = (i0 + KC).min(k);
+            for p in (r0 / MR)..(r1 / MR) {
+                let ap = &a.data[p * k * MR..];
+                let co = (p * MR - r0) * tn;
+                for ii in i0..kn {
+                    let aoff = ii * MR;
+                    let brow_c = &bc[ii * t_full + t0..ii * t_full + t0 + nw];
+                    let brow_u = &bu[ii * t_full + t0..ii * t_full + t0 + nw];
+                    for m in 0..MR {
+                        let av = ap[aoff + m];
+                        let crow_c = &mut cc[co + m * tn + (t0 - tc0)..co + m * tn + (t0 - tc0) + nw];
+                        let crow_u = &mut cu[co + m * tn + (t0 - tc0)..co + m * tn + (t0 - tc0) + nw];
+                        run_saxpy(ker, crow_c, brow_c, av, nw);
+                        run_saxpy(ker, crow_u, brow_u, av, nw);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Scalar fallback for [`sgemm_range`] (non-x86 / no AVX2): the original
 /// bias-fill + K-loop SAXPY nest.
 fn sgemm_range_scalar(
