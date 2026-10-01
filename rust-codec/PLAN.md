@@ -183,3 +183,20 @@
 - Gates: base _predict+adaln 6.1e-6, full euler-CFG-speaker 1.1e-5, clone
   teacher-forced DiT-CFG 2.4e-4 / wav 1.8e-5 / stops 60-60, true-ring loc
   3.2e-2. CLI smoke: base clone 20 steps, 3.20s, RTF 1.14.
+
+## 23. 单包默认 trim + 性能方法论对齐 QORA（M31）
+- 单包路径此前为保 bit-identical 而写裸输出，base clone 实测 3.2s 音频含
+  1.9s 尾部静音（stop 滞后）。改默认 trim（0.25s）+ peak 0.98，
+  `--no-trim` 恢复旧行为。验证：3.20s → 1.60s。
+- 性能方法论（QORA-TTS-12Hz-1.7B docs/avx2-plan, decoder-q4-plan, pmu-pitfall）：
+  门禁0先量后动、解析流量模型优先于 PMU（LLC-miss 漏 prefetch 流量 10 倍+）、
+  unsafe 单点包络+标量 oracle、不达标杀项目。
+
+## 24. 门禁0：base 单步流量模型（未动手，先量）
+- 权重（fp32 常驻，bf16 load 时展开）：LM 508MB × 双分支 ≈ 1.0GB，
+  DiT 282MB × 20 predicts ≈ 5.6GB，LocEnc ≈ 0.1GB → **≈6.7GB/AR 步**。
+- 210ms/步实测 ⟹ ~32GB/s，带宽墙；DiT 占流量 84%，distill 复算
+  1.6GB/步 ≈ 50ms 与实测 40ms 吻合，模型可信。
+- 结论：性能工作从 DiT 开始。Stage 1 = bf16-DiT（fp32 累加，流量减半，
+  预期步进 -40%）；Stage 2 = int8/Q4（待 Stage 1 门禁过后再议）。
+  杀线：Stage 1 必须实测 RTF 增益 + 耳验 A/B 通过，否则关闭。

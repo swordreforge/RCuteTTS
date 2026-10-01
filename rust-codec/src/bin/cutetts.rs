@@ -95,6 +95,8 @@ options:
                          (audit what the model actually sees; no synthesis)
   --no-level             skip per-chunk loudness leveling (multi-chunk
                          default: speech RMS leveled to median, peak 0.98)
+  --no-trim              keep raw output incl. trailing stop-lag silence
+                         (default trims tails/gaps to 0.25s, peak 0.98)
   --stream               stream PCM to the wav per AR step (first packet
                          right after prefill + 1 step; raw concat, no
                          trim/pad/crossfade — test mode)
@@ -799,9 +801,16 @@ fn main() {
     // then 0.15s tail pad, then 30ms crossfade, then a global 0.98 peak
     // guard. Trim kills the "waits forever" long tails; pad guarantees
     // the fade starts from digital silence.
-    // Single piece: write as-is (no pad — bit-identical to old behavior).
+    // Single piece: trim + peak guard too (stop lag leaves trailing
+    // silence otherwise); --no-trim restores legacy bit-exact raw output.
     let wav: Vec<f32> = if wavs.len() == 1 {
-        wavs.pop().unwrap()
+        let w = wavs.pop().unwrap();
+        if has_flag(&args, "--no-trim") {
+            w
+        } else {
+            let t = cutetts_codec::chunk::trim_silence(&w, 24000, 0.25);
+            cutetts_codec::chunk::peak_guard(&t, 0.98)
+        }
     } else {
         let trimmed: Vec<Vec<f32>> = wavs
             .iter()
