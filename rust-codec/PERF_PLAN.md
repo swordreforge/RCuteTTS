@@ -13,10 +13,25 @@
 
 | 场景 | prefill | AR 步进 | 整体 RTF |
 |---|---|---|---|
-| distill 短句 | 0.07 s（T=26） | ~40 ms/步 | ~0.4 |
+| distill 短句 | 0.07–0.20 s（T=23~26） | ~68 ms/步 | ~0.4 |
 | distill 长文 39 包 | — | — | 0.44 |
-| base 短句（12 步） | 0.12 s（T=23） | ~210 ms/步 | 1.32 |
+| base 短句（12 步） | 0.12–0.18 s（T=23） | ~210 ms/步 | 1.32 |
 | base 流式管 | — | step mean 91 ms（distill） | 1.00 |
+
+Stage 0 phase-split 实测（`--profile-steps`，"Hello world..."，seed 42）：
+
+| phase | base（12 步） | distill（13 步） |
+|---|---|---|
+| DiT euler | mean 159.8ms **(77%)** | mean 33.2ms (49%) |
+| LocEnc 反馈 | 3.6ms (2%) | 3.6ms (5%) |
+| LM decode（双分支/base 单分支） | 20.3ms (10%) | 10.1ms (15%) |
+| VAE（offline 摊销） | 24.1ms/步 (12%) | 21.6ms/步 (32%) |
+
+- base DiT 占比 77%，落进 80%±10% 门 → **解析模型确认，动手只动 DiT**。
+- distill 步进里 VAE 摊销占 1/3（整句解码内存搬运），但绝对值小；
+  Stage 1（bf16-DiT）对两者都有效，distill 绝对收益小。
+- 附带：同文本 seed 42 在 stability 门下分别报 AbruptEnd(0.08) /
+  Hole(6)——属 P2 抽签范畴，与本计划正交。
 
 - base euler_sample_cfg 全采样：0.23–0.25 s/次（含 20 predicts）→ DiT 占主导。
 - torch 对照：prefill T=48 我方 0.061 vs torch 0.040（已冻结，见 §5）。

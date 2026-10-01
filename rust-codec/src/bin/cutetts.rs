@@ -101,6 +101,8 @@ options:
   --stream               stream PCM to the wav per AR step (first packet
                          right after prefill + 1 step; raw concat, no
                          trim/pad/crossfade — test mode)
+  --profile-steps        per-AR-step phase split (dit/locenc/lm/vae p50/p99,
+                         Stage 0 instrument; zero behavioral impact)
   --retries N            default 0 (single attempt, bit-identical replay).
                          N>0: retry a chunk with seed+attempt until it passes
                          the stability gate (mid-utterance silence holes and
@@ -321,6 +323,30 @@ struct BaseCfg {
     cfg: f32,
 }
 
+/// Per-AR-step phase timers (Stage 0 instrument, `--profile-steps`).
+/// Turns the analytical traffic model (PERF_PLAN §1.2) into a measured
+/// phase split. Zero behavioral impact when disabled.
+#[derive(Default)]
+struct PhaseTimes {
+    dit: Vec<f32>,
+    locenc: Vec<f32>,
+    lm: Vec<f32>,
+    vae: Vec<f32>,
+}
+
+fn profile_report(name: &str, v: &[f32]) -> String {
+    if v.is_empty() {
+        return format!("{name}: n/a");
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = s.len();
+    let mean = s.iter().sum::<f32>() / n as f32;
+    let p50 = s[n / 2];
+    let p99 = s[(n * 99 / 100).min(n - 1)];
+    format!("{name}: n={n} mean={:.1}ms p50={:.1}ms p99={:.1}ms", mean * 1000.0, p50 * 1000.0, p99 * 1000.0)
+}
+
 /// Synthesize one text piece -> mono 24k samples. Returns (wav, steps).
 /// `chunk_seed` is the effective seed for this piece (caller derives
 /// base+idx for multi-chunk runs so replays are deterministic).
@@ -340,6 +366,7 @@ fn synth_one(
     pipe_log: bool,
     base: Option<&BaseCfg>,
     cfg_w: f32,
+    profile: bool,
 ) -> (Vec<f32>, usize) {
     let t00 = Instant::now();
     // Prefix. tts: text only; clone: full reference chain.
@@ -389,6 +416,7 @@ fn synth_one(
     let mut vstream = stream.map(|ws| {
         (ws, cutetts_codec::stream::StreamingDecoder::new(&w.vae, nth), false)
     });
+    let mut ph = PhaseTimes::default();
     let mut rng = Rng(effective_seed(chunk_seed));
     let mut cond = vec![0.0f32; 128]; // initial previous cond = zeros [1,2,64]
     let mut latents: Vec<f32> = Vec::new();
@@ -408,7 +436,8 @@ fn synth_one(
             break;
         }
         let (pred, scaled) = {
-            match base {
+            let t_dit = Instant::now();
+            let out = match base {
                 Some(bc) => {
                     let u = uncond.as_ref().unwrap();
                     let p = cutetts_codec::dit::euler_sample_cfg(
@@ -423,12 +452,20 @@ fn synth_one(
                     let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
                     (p, s)
                 }
+            };
+            if profile {
+                ph.dit.push(t_dit.elapsed().as_secs_f32());
             }
+            out
         };
         // next cond = UNSCALED pred ([2,64] flat, as returned).
         // Feedback MUST be RAW pred too (generation.py:1022 uses pred_latent,
         // not pred_latent_scaled; scaled compounds every step).
+        let t_loc = Instant::now();
         let fb = locenc_embed(&w.locenc, &pred, 1, 1, nth);
+        if profile {
+            ph.locenc.push(t_loc.elapsed().as_secs_f32());
+        }
         cond = pred;
         if let Some(u) = uncond.as_mut() {
             // separate uncond history tracks the same RAW pred (base plan:
@@ -443,7 +480,11 @@ fn synth_one(
                     patch[c * 2 + k] = scaled[k * 64 + c];
                 }
             }
+            let t_vae = Instant::now();
             let pcm = dec.decode_chunk(&patch, 2);
+            if profile {
+                ph.vae.push(t_vae.elapsed().as_secs_f32());
+            }
             debug_assert_eq!(pcm.len(), 3840);
             ws.push(&pcm);
             wav_streamed.extend_from_slice(&pcm);
@@ -454,12 +495,16 @@ fn synth_one(
         } else {
             latents.extend_from_slice(&scaled);
         }
+        let t_lm = Instant::now();
         last = decode_step(&w.qwen, &fb, tpre + steps, &mut cache);
         if let Some(u) = uncond.as_mut() {
             // same acoustic input feeds both branches (generation.py:1046-1071)
             let uh = decode_step(&w.qwen, &fb, u.pos, &mut u.cache);
             u.last = uh;
             u.pos += 1;
+        }
+        if profile {
+            ph.lm.push(t_lm.elapsed().as_secs_f32());
         }
         steps += 1;
         if vstream.is_some() {
@@ -476,6 +521,11 @@ fn synth_one(
         let p99 = step_times[(n * 99 / 100).min(n - 1)];
         say!(pipe_log, "stream pacing: {} packets, step mean {:.1}ms p99 {:.1}ms (budget 160ms/packet)",
             n, mean * 1000.0, p99 * 1000.0);
+        if profile {
+            say!(pipe_log, "profile: {} | {} | {} | {}",
+                profile_report("dit", &ph.dit), profile_report("locenc", &ph.locenc),
+                profile_report("lm", &ph.lm), profile_report("vae", &ph.vae));
+        }
         return (wav_streamed, steps);
     }
     let nframes = steps * 2;
@@ -485,7 +535,15 @@ fn synth_one(
             frames[c * nframes + t] = latents[t * 64 + c];
         }
     }
+    let t_vae = Instant::now();
     let wav = decode_nth(&w.vae, &frames, nframes, nth);
+    if profile {
+        let dt = t_vae.elapsed().as_secs_f32();
+        let per_step = if steps > 0 { dt / steps as f32 } else { 0.0 };
+        say!(pipe_log, "profile: {} | {} | {} | vae-offline: {:.1}s total ({:.1}ms/step)",
+            profile_report("dit", &ph.dit), profile_report("locenc", &ph.locenc),
+            profile_report("lm", &ph.lm), dt, per_step * 1000.0);
+    }
     (wav, steps)
 }
 
@@ -728,6 +786,7 @@ fn main() {
     // `--output -` pipes raw s16le mono 24k to stdout (players: play/ffplay
     // below); all human logs move to stderr so the pipe stays clean.
     let streaming = has_flag(&args, "--stream");
+    let profiling = has_flag(&args, "--profile-steps");
     if streaming && retries > 0 {
         err("--retries with --stream would emit rejected audio; use one or the other");
     }
@@ -762,7 +821,7 @@ fn main() {
             loop {
                 let cs_try = cs.wrapping_add(attempt as u64);
                 let (w, s) = synth_one(&w, &tok, piece, cs_try, max_steps, nth, clone_ctx.as_ref(), sink_opt.as_mut(), pipe,
-                    if variant == "base" { Some(&bc) } else { None }, cfg_strength);
+                    if variant == "base" { Some(&bc) } else { None }, cfg_strength, profiling);
                 match cutetts_codec::chunk::stability(&w, hole_thresh, tail_thresh) {
                     cutetts_codec::chunk::Stability::Ok => {
                         if attempt > 0 {
