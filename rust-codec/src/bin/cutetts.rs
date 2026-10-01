@@ -77,7 +77,7 @@ options:
   --text TEXT              text to speak (mutually exclusive with --text-file)
   --text-file PATH         read text from file (trailing newline trimmed;
                          long text auto-splits into sentence chunks, 30ms
-                         crossfade join; chunk seeds = base+idx)
+                         crossfade join; chunk seeds per --chunk-seeds)
   --output PATH            output wav (16-bit mono 24kHz, overwritten);
                          `-` = raw s16le mono 24k to stdout for piping:
                            ... --output - --stream | play -t raw -r 24000 -e signed -b 16 -c 1 -
@@ -91,7 +91,7 @@ options:
   --print-chunks         print post-TN chunks (with token counts) and exit
                          (audit what the model actually sees; no synthesis)
   --no-level             skip per-chunk loudness leveling (multi-chunk
-                         default: speech RMS leveled to chunk 0, peak 0.98)
+                         default: speech RMS leveled to median, peak 0.98)
   --stream               stream PCM to the wav per AR step (first packet
                          right after prefill + 1 step; raw concat, no
                          trim/pad/crossfade — test mode)
