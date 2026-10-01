@@ -167,12 +167,17 @@ Stage 0 phase-split 实测（`--profile-steps`，"Hello world..."，seed 42）�
   但 tile 配置/信号抢占/回退链是 Stage-2 量级工程），或换一台
   shuffle 不瓶颈的机器重测 gate-4。
 
-## 8. 新 gate-0 候选：CFG 双分支面板融合（未动手，先量）
+## 8. 新 gate-0 候选：CFG 双分支面板融合（已量，可立项）
 
 - 动机：DiT 20 predicts/步里 cond/uncond 分支是同一权重先后各扫一遍
   （5.6GB 中的一半是重复流量）；面板级融合（同一 panel 一次读出、
   双分支各算各的）可省 ~40% DiT 流量，**不碰精度**（每分支 op 序不变
   → 可逐位验证）。
-- 动手前先量：确认双分支权重重读确实各走一次 DRAM（解析上是，perf
-  抽查 cache-miss 趋势），再估融合后的 panel 常驻可行性。
-- 杀线：融合版与现版逐位一致 + 实测步进 -25%，否则关闭。
+- 门禁0实测（临时 example，测完即删；LLC 24MB vs DiT 282MB）：
+  1× predict 7.5ms，2× sequential 15.4ms，**ratio 2.04**——分支间零复用，
+  第二遍全额 DRAM 重读。融合预期：DiT 5.6→~2.9GB/步，base 步进
+  210→~125ms（RTF 1.32→~0.8）。
+- 杀线：融合版与现版**逐位一致** + 实测步进 -25%，否则关闭。
+- 实施要点：分支循环下沉到 linear/panel 作用域（线程池切分按 panel 对
+  保持），predict_cached 签名动，euler_sample_cfg 主循环改； thread
+  safety 与现有 pool scope 同构。
