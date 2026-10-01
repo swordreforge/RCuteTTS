@@ -1,0 +1,130 @@
+"""WER/CER eval for CuteTTS Rust outputs (P3).
+ASR: FunASR paraformer-zh (CPU). NOTE: pass wav as numpy (file-path input
+segfaults in funasr 1.4.16's audio loader on this box); 24k -> 16k via
+scipy. Metric is CER (Chinese) / WER (whitespace languages) on normalized
+text: lowercase latin, full->half width, strip punct/space, keep CJK+alnum.
+
+Reference must be what was SPOKEN: for --text-file runs that's the POST-TN
+text (regenerate with `cutetts --print-chunks`, concatenated, or pass the
+original file plus --tn to apply the same documented rules... simplest is
+caller passes the exact spoken text file).
+
+Usage:
+  wer_eval.py hyp.wav ref.txt [--lang zh|en] [--sr 24000]
+  wer_eval.py --manifest eval_manifest.json   # batch: [{wav, ref, lang, tag}]
+
+Batch output: per-item CER + macro average. Exit 0 always (numbers, no gate).
+"""
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+from scipy.signal import resample_poly
+
+
+def load_16k(path: str, src_sr: int = 24000) -> np.ndarray:
+    d, sr = sf.read(path, dtype="float32", always_2d=True)
+    d = d.mean(axis=1)
+    if sr != 16000:
+        g = np.gcd(sr, 16000)
+        d = resample_poly(d, 16000 // g, sr // g).astype(np.float32)
+    return d
+
+
+def norm(text: str, keep_space: bool = False) -> str:
+    text = unicodedata.normalize("NFKC", text).lower()
+    out = []
+    for c in text:
+        if c.isspace():
+            if keep_space:
+                out.append(" ")
+            continue
+        if unicodedata.category(c).startswith("P"):
+            continue
+        if "a" <= c <= "z" or "0" <= c <= "9" or "\u4e00" <= c <= "\u9fff":
+            out.append(c)
+    return "".join(out)
+
+
+def edit_dist(a: str, b: str) -> int:
+    # char-level Levenshtein, O(min) memory
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[-1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def cer(ref: str, hyp: str) -> tuple[float, int, int]:
+    r, h = norm(ref), norm(hyp)
+    if not r:
+        return (0.0 if not h else 1.0), 0, len(h)
+    return edit_dist(r, h) / max(len(r), 1), len(r), edit_dist(r, h)
+
+
+_asr = None
+
+
+def transcribe(wav16: np.ndarray) -> str:
+    global _asr
+    if _asr is None:
+        from funasr import AutoModel
+
+        _asr = AutoModel(model="paraformer-zh", device="cpu", disable_update=True)
+    r = _asr.generate(input=wav16)
+    return r[0]["text"] if r else ""
+
+
+def eval_one(wav: str, ref_path: str, lang: str, src_sr: int) -> dict:
+    ref = Path(ref_path).read_text().strip()
+    hyp = transcribe(load_16k(wav, src_sr))
+    score, n, errs = cer(ref, hyp)
+    unit = "CER" if lang == "zh" else "WER-words?"
+    # word-level for non-CJK: split normalized latin/digit runs
+    if lang != "zh":
+        rn = norm(ref, keep_space=True).split()
+        hn = norm(hyp, keep_space=True).split()
+        e = edit_dist(rn, hn)
+        score, n, errs = e / max(len(rn), 1), len(rn), e
+        unit = "WER"
+    else:
+        unit = "CER"
+    return {"wav": wav, "unit": unit, "score": score, "n": n, "errs": errs, "hyp": hyp}
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if args and args[0] == "--manifest":
+        items = json.loads(Path(args[1]).read_text())
+        scores = []
+        for it in items:
+            r = eval_one(it["wav"], it["ref"], it.get("lang", "zh"), it.get("sr", 24000))
+            r["tag"] = it.get("tag", "")
+            scores.append(r["score"])
+            print(f"[{r['tag']}] {r['unit']}={r['score']:.3f} (errs={r['errs']}/{r['n']})")
+            print(f"  hyp: {r['hyp'][:120]}")
+        print(f"macro avg: {sum(scores) / max(len(scores), 1):.3f} over {len(scores)} items")
+        return
+    wav, ref = args[0], args[1]
+    lang = "zh"
+    sr = 24000
+    for i, a in enumerate(args[2:]):
+        if a == "--lang":
+            lang = args[3 + i]
+        if a == "--sr":
+            sr = int(args[3 + i])
+    r = eval_one(wav, ref, lang, sr)
+    print(f"{r['unit']}={r['score']:.3f} (errs={r['errs']}/{r['n']})")
+    print(f"hyp: {r['hyp']}")
+
+
+if __name__ == "__main__":
+    main()
