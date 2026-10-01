@@ -1,0 +1,24 @@
+{
+ "text": "Hello world, this is a test.",
+ "seed": 42,
+ "steps": 13,
+ "stops": [
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  false,
+  true
+ ],
+ "scale": 0.4127216339111328,
+ "bias": -0.0021514892578125,
+ "sample_rate": 24000,
+ "prefix_len": 23
+}

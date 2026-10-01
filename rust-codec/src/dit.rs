@@ -57,11 +57,12 @@ pub struct DitW {
     pub time_mlp2: DitLinear,
     pub delta_mlp1: DitLinear,
     pub delta_mlp2: DitLinear,
-    pub step_mlp1: DitLinear,
-    pub step_mlp2: DitLinear,
+    pub step_mlp1: Option<DitLinear>,
+    pub step_mlp2: Option<DitLinear>,
     /// Linear(1,1024,bias=False) -> SiLU -> Linear(1024,1024,bias=False).
-    pub cfg_emb0: DitLinear,
-    pub cfg_emb2: DitLinear,
+    /// None on base checkpoints (no cfg_strength_embedding.* keys).
+    pub cfg_emb0: Option<DitLinear>,
+    pub cfg_emb2: Option<DitLinear>,
     pub layers: [DitLayerW; N_LAYERS],
     pub final_norm: Vec<f32>,
 }
@@ -85,6 +86,13 @@ fn lin(map: &HashMap<String, (Vec<usize>, Vec<f32>)>, prefix: &str, o: usize, i:
     let mut bp = vec![0.0f32; g.rows];
     bp[..o].copy_from_slice(&b);
     DitLinear { w: g, b: bp, out_dim: o }
+}
+
+fn lin_opt(map: &HashMap<String, (Vec<usize>, Vec<f32>)>, prefix: &str, o: usize, i: usize) -> Option<DitLinear> {
+    if !map.contains_key(&format!("{prefix}.weight")) {
+        return None;
+    }
+    Some(lin(map, prefix, o, i))
 }
 
 fn norm_w(map: &HashMap<String, (Vec<usize>, Vec<f32>)>, name: &str, dim: usize) -> Vec<f32> {
@@ -111,7 +119,7 @@ pub fn load_dit_weights(path: &std::path::Path) -> DitW {    let bytes = std::fs
         assert_eq!(v.len(), shape.iter().product::<usize>(), "{name}");
         map.insert(name["head.".len()..].to_string(), (shape, v));
     }
-    assert_eq!(map.len(), 61, "distill head tensor count, got {}", map.len());
+    assert!(map.len() == 61 || map.len() == 55, "dit head tensor count, got {}", map.len());
 
     let mut layers = Vec::with_capacity(N_LAYERS);
     for li in 0..N_LAYERS {
@@ -141,10 +149,10 @@ pub fn load_dit_weights(path: &std::path::Path) -> DitW {    let bytes = std::fs
         time_mlp2: lin(&map, "time_mlp.linear_2", HIDDEN, HIDDEN),
         delta_mlp1: lin(&map, "delta_time_mlp.linear_1", HIDDEN, HIDDEN),
         delta_mlp2: lin(&map, "delta_time_mlp.linear_2", HIDDEN, HIDDEN),
-        step_mlp1: lin(&map, "step_size_embedding.linear_1", HIDDEN, HIDDEN),
-        step_mlp2: lin(&map, "step_size_embedding.linear_2", HIDDEN, HIDDEN),
-        cfg_emb0: lin(&map, "cfg_strength_embedding.0", HIDDEN, 1),
-        cfg_emb2: lin(&map, "cfg_strength_embedding.2", HIDDEN, HIDDEN),
+        step_mlp1: lin_opt(&map, "step_size_embedding.linear_1", HIDDEN, HIDDEN),
+        step_mlp2: lin_opt(&map, "step_size_embedding.linear_2", HIDDEN, HIDDEN),
+        cfg_emb0: lin_opt(&map, "cfg_strength_embedding.0", HIDDEN, 1),
+        cfg_emb2: lin_opt(&map, "cfg_strength_embedding.2", HIDDEN, HIDDEN),
         layers: [layers.remove(0), layers.remove(0), layers.remove(0), layers.remove(0)],
         final_norm: norm_w(&map, "decoder.norm.weight", HIDDEN),
     }
@@ -395,10 +403,26 @@ fn time_mlp(x: &[f32], l1: &DitLinear, l2: &DitLinear, nth: usize) -> Vec<f32> {
 }
 
 /// cfg_strength path: Linear(1->H, no bias) -> SiLU -> Linear(H->H, no bias).
+/// cfg_strength path: Linear(1->H, no bias) -> SiLU -> Linear(H->H, no bias).
 fn cfg_emb(w_norm: f32, e0: &DitLinear, e2: &DitLinear, nth: usize) -> Vec<f32> {
     let h = linear_rows(&[w_norm], 1, e0, nth);
     let a = silu_vec(&h);
     linear_rows(&a, 1, e2, nth)
+}
+
+/// Missing embeddings (base checkpoint) → zeros (torch adds nothing).
+fn cfg_emb_opt(w_norm: f32, e0: &Option<DitLinear>, e2: &Option<DitLinear>, nth: usize) -> Vec<f32> {
+    match (e0, e2) {
+        (Some(a), Some(b)) => cfg_emb(w_norm, a, b, nth),
+        _ => vec![0.0f32; HIDDEN],
+    }
+}
+
+fn step_emb_opt(dt: f32, m1: &Option<DitLinear>, m2: &Option<DitLinear>, nth: usize) -> Vec<f32> {
+    match (m1, m2) {
+        (Some(a), Some(b)) => time_mlp(&sin_emb(dt), a, b, nth),
+        _ => vec![0.0f32; HIDDEN],
+    }
 }
 
 /// Full _predict: x[2,64], t, z[1024], cond[2,64], dt, spk[256], w -> [2,64].
@@ -424,8 +448,8 @@ pub fn predict(
     let ch = linear_rows(cond, PATCH, &w.cond_proj, nth);
     let t_emb = time_mlp(&sin_emb(t), &w.time_mlp1, &w.time_mlp2, nth);
     let dt_emb = time_mlp(&sin_emb(0.0), &w.delta_mlp1, &w.delta_mlp2, nth);
-    let step_emb = time_mlp(&sin_emb(dt), &w.step_mlp1, &w.step_mlp2, nth);
-    let strength = cfg_emb(cfg_w / 5.0, &w.cfg_emb0, &w.cfg_emb2, nth);
+    let step_emb = step_emb_opt(dt, &w.step_mlp1, &w.step_mlp2, nth);
+    let strength = cfg_emb_opt(cfg_w / 5.0, &w.cfg_emb0, &w.cfg_emb2, nth);
     // mu = z + t + dt + step + cfg
     let mut mu = vec![0.0f32; HIDDEN];
     for d in 0..HIDDEN {
@@ -489,8 +513,8 @@ pub struct SampleCond {
 /// t_emb is NOT included (depends on step t).
 pub fn sample_prologue(w: &DitW, spk: Option<&[f32]>, dt: f32, cfg_w: f32, nth: usize) -> SampleCond {
     let dt_emb = time_mlp(&sin_emb(0.0), &w.delta_mlp1, &w.delta_mlp2, nth);
-    let step_emb = time_mlp(&sin_emb(dt), &w.step_mlp1, &w.step_mlp2, nth);
-    let cfg_emb = cfg_emb(cfg_w / 5.0, &w.cfg_emb0, &w.cfg_emb2, nth);
+    let step_emb = step_emb_opt(dt, &w.step_mlp1, &w.step_mlp2, nth);
+    let cfg_emb = cfg_emb_opt(cfg_w / 5.0, &w.cfg_emb0, &w.cfg_emb2, nth);
     let adalns = spk.map(|s| w.layers.iter().map(|lw| linear_rows(s, 1, &lw.adaln, nth)).collect());
     SampleCond { dt_emb, step_emb, cfg_emb, adalns }
 }
@@ -560,6 +584,55 @@ pub fn euler_sample(
         let v = predict_cached(w, &x, t, z, cond, &sc, nth, &cos, &sin);
         for i in 0..x.len() {
             x[i] += v[i] * dt;
+        }
+    }
+    x
+}
+
+/// F5-TTS Sway time grid on [0,1]: u + coeff*(cos(pi*u/2) - 1 + u).
+/// Mirrors sway_timesteps (diffusion_head.py:31-55). coeff=0 → uniform.
+pub fn sway_timesteps(steps: usize, coeff: f32) -> Vec<f32> {
+    assert!(steps >= 1);
+    let mut out = Vec::with_capacity(steps + 1);
+    for s in 0..=steps {
+        let u = s as f32 / steps as f32;
+        out.push(u + coeff * ((0.5 * std::f32::consts::PI * u).cos() - 1.0 + u));
+    }
+    out
+}
+
+/// Base Euler sample: sway grid + dual-branch CFG combine.
+/// Mirrors _euler_sway (diffusion_head.py:58-97) with the base _predict
+/// (no step-size/cfg-strength embeddings — zeros when keys absent).
+/// x0: initial noise [2,64]. z_cond/z_uncond: LM hidden [1024] per branch.
+/// cond/uncond: previous patches [2,64] flat (separate histories).
+/// velocity = vc + cfg*(vc - vu). spk shared across branches (torch repeat).
+pub fn euler_sample_cfg(
+    w: &DitW,
+    x0: &[f32],
+    z_cond: &[f32],
+    z_uncond: &[f32],
+    cond: &[f32],
+    uncond: &[f32],
+    spk: Option<&[f32]>,
+    steps: usize,
+    coeff: f32,
+    cfg: f32,
+    nth: usize,
+) -> Vec<f32> {
+    assert_eq!(x0.len(), PATCH * LATENT);
+    assert!(cfg > 0.0, "cfg=0 is the distill single-branch path");
+    let sc = sample_prologue(w, spk, 1.0 / steps as f32, cfg, nth);
+    let times = sway_timesteps(steps, coeff);
+    let (cos, sin) = rope_tables_for(SEQ);
+    let mut x = x0.to_vec();
+    for s in 0..steps {
+        let t = times[s];
+        let dt = times[s + 1] - times[s];
+        let vc = predict_cached(w, &x, t, z_cond, cond, &sc, nth, &cos, &sin);
+        let vu = predict_cached(w, &x, t, z_uncond, uncond, &sc, nth, &cos, &sin);
+        for i in 0..x.len() {
+            x[i] += (vc[i] + cfg * (vc[i] - vu[i])) * dt;
         }
     }
     x

@@ -7,7 +7,7 @@
 //! Production runs LM/LocEnc in bf16; Rust runs everything fp32, so stage
 //! gates below allow the measured dtype drift (see dump output).
 
-use crate::dit::{euler_sample, load_dit_weights, DitW};
+use crate::dit::{euler_sample, euler_sample_cfg, load_dit_weights, DitW};
 use crate::locenc::{load_locenc_weights, LocencW};
 use crate::qwen::{load_qwen_weights, QwenW};
 use crate::weights::load_decoder_weights;
@@ -101,6 +101,26 @@ pub fn dit_step(
     nth: usize,
 ) -> (Vec<f32>, Vec<f32>) {
     let pred = euler_sample(&w.dit, x0, z, cond, spk, 4, 2.0, nth);
+    let scaled: Vec<f32> = pred.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
+    (pred, scaled)
+}
+
+/// Base-variant AR step: sway Euler + dual-branch CFG.
+/// cond/uncond are the separate previous patches [2,64] flat.
+pub fn dit_step_cfg(
+    w: &AllW,
+    x0: &[f32],
+    z_cond: &[f32],
+    z_uncond: &[f32],
+    cond: &[f32],
+    uncond: &[f32],
+    spk: Option<&[f32]>,
+    steps: usize,
+    sway: f32,
+    cfg: f32,
+    nth: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let pred = euler_sample_cfg(&w.dit, x0, z_cond, z_uncond, cond, uncond, spk, steps, sway, cfg, nth);
     let scaled: Vec<f32> = pred.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
     (pred, scaled)
 }

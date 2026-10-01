@@ -83,6 +83,9 @@ options:
                            ... --output - --stream | play -t raw -r 24000 -e signed -b 16 -c 1 -
                            ... --output - | ffplay -f s16le -ar 24000 -ac 1 -i -
   --seed N                 u64 seed; default = random each run (printed, reuse to replay)
+  --cfg-strength F         default 2.0 (base: LM-CFG strength; distill: distilled CFG in [0,5])
+  --sway F                 default -0.8, base only (distill rejects nonzero)
+  --diffusion-steps N      default 4 (distill: 1|2|4) or 10 (base, >= 1)
   --max-steps N            default 750 (each step = 2 latent frames = 0.16s)
   --chunk-seeds same|incr default same (one seed for all chunks: stable
                          timbre; incr = base+idx, old behavior)
@@ -302,6 +305,13 @@ struct CloneCtx {
     pw: PrefixW,
 }
 
+/// Base-variant DiT sampling params (dual-branch LM CFG + sway Euler).
+struct BaseCfg {
+    steps: usize,
+    sway: f32,
+    cfg: f32,
+}
+
 /// Synthesize one text piece -> mono 24k samples. Returns (wav, steps).
 /// `chunk_seed` is the effective seed for this piece (caller derives
 /// base+idx for multi-chunk runs so replays are deterministic).
@@ -319,6 +329,8 @@ fn synth_one(
     clone: Option<&CloneCtx>,
     stream: Option<&mut Sink>,
     pipe_log: bool,
+    base: Option<&BaseCfg>,
+    cfg_w: f32,
 ) -> (Vec<f32>, usize) {
     let t00 = Instant::now();
     // Prefix. tts: text only; clone: full reference chain.
@@ -342,6 +354,28 @@ fn synth_one(
     let mut last = h[(tpre - 1) * 1024..tpre * 1024].to_vec();
     say!(pipe_log, "prefill T={tpre}: {:.2}s", t0.elapsed().as_secs_f32());
 
+    // Base dual branch: uncond = suffix token only, own cache + positions,
+    // same acoustic feedback as cond (generation.py:1022/1046-1071).
+    // tts only (base voice_clone deferred — caller rejects it).
+    struct Uncond {
+        cache: Vec<QwenCache>,
+        last: Vec<f32>,
+        prev: Vec<f32>,
+        pos: usize,
+    }
+    let mut uncond = match base {
+        Some(_) => {
+            let uids = tok.encode(cutetts_codec::prefix::SUFFIX_TAIL);
+            let upre = embed_lookup(&w.qwen, &uids);
+            let ut = uids.len();
+            let mut uc = QwenCache::empty();
+            let uh = prefill(&w.qwen, &upre, ut, 0, &mut uc, nth);
+            let ul = uh[(ut - 1) * 1024..ut * 1024].to_vec();
+            Some(Uncond { cache: uc, last: ul, prev: vec![0.0f32; 128], pos: ut })
+        }
+        None => None,
+    };
+
     let mut vstream = stream.map(|ws| {
         (ws, cutetts_codec::stream::StreamingDecoder::new(&w.vae, nth), false)
     });
@@ -364,15 +398,33 @@ fn synth_one(
             break;
         }
         let (pred, scaled) = {
-            let p = euler_sample(&w.dit, &x0, &last, &cond, spk_opt.as_deref(), 4, 2.0, nth);
-            let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
-            (p, s)
+            match base {
+                Some(bc) => {
+                    let u = uncond.as_ref().unwrap();
+                    let p = cutetts_codec::dit::euler_sample_cfg(
+                        &w.dit, &x0, &last, &u.last, &cond, &u.prev,
+                        spk_opt.as_deref(), bc.steps, bc.sway, bc.cfg, nth,
+                    );
+                    let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
+                    (p, s)
+                }
+                None => {
+                    let p = euler_sample(&w.dit, &x0, &last, &cond, spk_opt.as_deref(), 4, cfg_w, nth);
+                    let s: Vec<f32> = p.iter().map(|&v| v / w.e2e.scale - w.e2e.bias).collect();
+                    (p, s)
+                }
+            }
         };
         // next cond = UNSCALED pred ([2,64] flat, as returned).
         // Feedback MUST be RAW pred too (generation.py:1022 uses pred_latent,
         // not pred_latent_scaled; scaled compounds every step).
         let fb = locenc_embed(&w.locenc, &pred, 1, 1, nth);
         cond = pred;
+        if let Some(u) = uncond.as_mut() {
+            // separate uncond history tracks the same RAW pred (base plan:
+            // uncond_history_always_zero=False)
+            u.prev = cond.clone();
+        }
         if let Some((ws, dec, first)) = vstream.as_mut() {
             // scaled is [2,64] row-major; streaming VAE wants [64,2]
             let mut patch = vec![0.0f32; 128];
@@ -393,6 +445,12 @@ fn synth_one(
             latents.extend_from_slice(&scaled);
         }
         last = decode_step(&w.qwen, &fb, tpre + steps, &mut cache);
+        if let Some(u) = uncond.as_mut() {
+            // same acoustic input feeds both branches (generation.py:1046-1071)
+            let uh = decode_step(&w.qwen, &fb, u.pos, &mut u.cache);
+            u.last = uh;
+            u.pos += 1;
+        }
         steps += 1;
         if vstream.is_some() {
             step_times.push(t_step.elapsed().as_secs_f32());
@@ -509,6 +567,59 @@ fn main() {
     let nth = default_threads();
     say!(pipe, "threads={nth} model={model_dir}");
     let root = PathBuf::from(&model_dir);
+    // variant selects the inference path (weights are otherwise identical)
+    let variant: String = {
+        let cfg_raw = std::fs::read_to_string(root.join("config.json"))
+            .unwrap_or_else(|e| panic!("read config.json: {e}"));
+        let cfg_json: serde_json::Value = serde_json::from_str(&cfg_raw).unwrap();
+        cfg_json.get("variant").and_then(|v| v.as_str()).unwrap_or("distill").to_string()
+    };
+    if variant != "base" && variant != "distill" {
+        err(&format!("config variant must be base or distill, got `{variant}`"));
+    }
+    let cfg_strength: f32 = match arg_val(&args, "--cfg-strength") {
+        Some(v) => v.parse().unwrap_or_else(|_| err("--cfg-strength must be a number")),
+        None => 2.0,
+    };
+    if !(cfg_strength.is_finite() && cfg_strength >= 0.0) {
+        err("--cfg-strength must be finite and >= 0");
+    }
+    let sway: f32 = match arg_val(&args, "--sway") {
+        Some(v) => v.parse().unwrap_or_else(|_| err("--sway must be a number")),
+        None => -0.8,
+    };
+    let diff_steps: usize = match arg_val(&args, "--diffusion-steps") {
+        Some(v) => v.parse().unwrap_or_else(|_| err("--diffusion-steps must be an integer")),
+        None => {
+            if variant == "base" {
+                10
+            } else {
+                4
+            }
+        }
+    };
+    if variant == "distill" {
+        if ![1, 2, 4].contains(&diff_steps) {
+            err("--diffusion-steps for distill must be 1, 2, or 4");
+        }
+        if sway != 0.0 {
+            err("distill does not support sway sampling (use base)");
+        }
+        if cfg_strength > 5.0 {
+            err("distill cfg-strength must be in [0, 5]");
+        }
+    } else {
+        if diff_steps < 1 {
+            err("--diffusion-steps must be positive for base");
+        }
+        if !(sway >= -1.0 && sway <= 2.0 / (std::f32::consts::PI - 2.0)) {
+            err("--sway outside valid domain [-1, 1.752]");
+        }
+        if mode == "voice_clone" {
+            err("base voice_clone is not wired yet (tts only in this pass)");
+        }
+    }
+    say!(pipe, "variant={variant} diffusion-steps={diff_steps} cfg={cfg_strength} sway={sway}");
     for p in [
         root.join("tokenizer/tokenizer.model"),
         root.join("weights/tts/model.safetensors"),
@@ -609,7 +720,9 @@ fn main() {
             say!(pipe, "--- chunk {}/{} ({} chars, seed={cs}) ---", idx + 1, pieces.len(), piece.chars().count());
         }
         let t1 = Instant::now();
-        let (wav, steps) = synth_one(&w, &tok, piece, cs, max_steps, nth, clone_ctx.as_ref(), sink_opt.as_mut(), pipe);
+        let bc = BaseCfg { steps: diff_steps, sway, cfg: cfg_strength };
+        let (wav, steps) = synth_one(&w, &tok, piece, cs, max_steps, nth, clone_ctx.as_ref(), sink_opt.as_mut(), pipe,
+            if variant == "base" { Some(&bc) } else { None }, cfg_strength);
         say!(pipe, "chunk {}: {steps} steps, {:.2}s audio ({:.2}s)", idx + 1, wav.len() as f32 / 24000.0, t1.elapsed().as_secs_f32());
         total_steps += steps;
         wavs.push(wav);

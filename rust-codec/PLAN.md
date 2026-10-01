@@ -153,3 +153,14 @@
   （八十GB/四十dB/一点七B），字母-数字连字符丢弃（AVX五一二），版本范围连读
   （x86-64→八六六四），年份容忍空格，字母+空格+数字视同型号。
 - 门：tests/tn.rs 5 项；`--print-chunks` 审计 39 包干净；v5 全量 260.6s。
+
+## 20. Base CFG wired, tts (P1，本轮）
+- base=distill 减 6 个 embedding key，其余 163 key 同 shape/dtype；loader 55|61 兼容。
+- `euler_sample_cfg`：sway 网格（10 步，coeff -0.8）+ 双分支 v=vc+2*(vc-vu)，
+  独立 cond/uncond 历史，cond 分支 stop，同 RAW 反馈喂双分支。
+- 门：sway 网格 1e-6（端点精确），base _predict 1e-4，euler-CFG replay 5e-4，
+  teacher-forced DiT-CFG 1.69e-5/wav 6.5e-6/stop 13-13，真环 loc 4.2e-5。
+- CLI：config.json variant 自适应 + `--cfg-strength/--sway/--diffusion-steps`
+ （torch 同名同默认值同校验）；base voice_clone 明确拒绝（下轮）。
+- 代价：同文本 distill 13 步 RTF~0.4 → base 12 步 RTF 1.32（10 步×双分支+2×LM）。
+  A/B 对：base_en42.wav（我们 1.92s）vs torch_base_en42.wav（2.08s）。
