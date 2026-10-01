@@ -164,3 +164,10 @@
  （torch 同名同默认值同校验）；base voice_clone 明确拒绝（下轮）。
 - 代价：同文本 distill 13 步 RTF~0.4 → base 12 步 RTF 1.32（10 步×双分支+2×LM）。
   A/B 对：base_en42.wav（我们 1.92s）vs torch_base_en42.wav（2.08s）。
+
+## 21. P2 突发自动重试（M30，本轮听感：123 的洞 / 42 的切尾）
+- 剖面：s123 第 5-6 包 0.00（洞），en42 尾包 0.08 硬切，s7 尾部 0.03→0.02 自然收敛。
+- `stability()` 门：洞（末两包之前任一包均值 < 0.005）+ 尾部不收敛（尾包 > 0.05），
+  阈值 `--hole-thresh/--tail-thresh` 可调；`--retries N` 逐包 seed+attempt 重试，
+  首个通过即收留，全挂保留末次；retries=0 保持 bit-identical；与 --stream 互斥。
+- 验证：seed 123 attempt0 Hole(5) 拒收 → seed 124 收敛 0.02→0.01 收留。

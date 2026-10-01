@@ -2,7 +2,10 @@
 //! Pure-logic, no weights. Adapted: our join pipeline is pad_tail-only
 //! (no trim_silence port — pad alone guarantees the fade zone starts
 //! from digital silence on the tail side).
-use cutetts_codec::chunk::{crossfade_concat, level_chunks, pad_tail, peak_guard, speech_rms, split_sentences, trim_silence};
+use cutetts_codec::chunk::{
+    crossfade_concat, level_chunks, pad_tail, peak_guard, speech_rms, split_sentences, stability, trim_silence,
+    Stability,
+};
 
 #[test]
 fn split_chinese() {
@@ -220,5 +223,24 @@ fn peak_guard_caps() {
     // under ceiling: bit-preserving
     let q = speech(12000, 0.2);
     assert_eq!(peak_guard(&q, 0.98), q);
+}
+
+#[test]
+fn stability_hole_and_tail() {
+    // good: speech with natural taper
+    let mut good = speech(3840 * 6, 0.2);
+    let tail = vec![0.01; 3840];
+    good.extend(tail);
+    assert_eq!(stability(&good, 0.005, 0.05), Stability::Ok);
+    // hole mid-utterance (s123 signature)
+    let mut bad = speech(3840 * 4, 0.2);
+    bad.extend(vec![0.0; 3840 * 2]);
+    bad.extend(speech(3840 * 4, 0.2));
+    assert_eq!(stability(&bad, 0.005, 0.05), Stability::Hole(4));
+    // hot ending (en42 signature)
+    let hot = speech(3840 * 5, 0.2);
+    assert!(matches!(stability(&hot, 0.005, 0.05), Stability::AbruptEnd(_)));
+    // too short: no veto
+    assert_eq!(stability(&[0.0; 100], 0.005, 0.05), Stability::Ok);
     println!("CHUNK gates passed");
 }

@@ -239,6 +239,45 @@ pub fn peak_guard(audio: &[f32], ceiling: f32) -> Vec<f32> {
     audio.iter().map(|v| v * g).collect()
 }
 
+/// Stability verdict for one chunk's wav (24k mono f32, one AR step =
+/// 3840 samples = 0.16s per patch).
+#[derive(Debug, PartialEq)]
+pub enum Stability {
+    Ok,
+    /// near-silent patch mid-utterance (stall/skip hole, e.g. base_s123
+    /// patches 5-6 at 0.00/0.00)
+    Hole(usize),
+    /// last patch still hot (early-cut ending, e.g. base_en42 ending 0.08
+    /// vs natural taper ~0.02)
+    AbruptEnd(f32),
+}
+
+/// Stability gate for P2 auto-retry. Thresholds calibrated on 3 base
+/// samples; exposed as CLI args for ear recalibration.
+/// `hole`: mean-abs below this on any patch before the last two → Hole.
+/// `tail`: last-patch mean-abs above this → AbruptEnd.
+pub fn stability(wav: &[f32], hole: f32, tail: f32) -> Stability {
+    const PATCH: usize = 3840;
+    if wav.len() < PATCH {
+        return Stability::Ok; // too short to judge; don't veto
+    }
+    let n = wav.len() / PATCH;
+    let mean = |i: usize| {
+        let s = &wav[i * PATCH..(i + 1) * PATCH];
+        s.iter().map(|v| v.abs()).sum::<f32>() / PATCH as f32
+    };
+    for i in 0..n.saturating_sub(2) {
+        if mean(i) < hole {
+            return Stability::Hole(i);
+        }
+    }
+    let last = mean(n - 1);
+    if last > tail {
+        return Stability::AbruptEnd(last);
+    }
+    Stability::Ok
+}
+
 /// Output len = sum - fade_len * (n-1). fade_len clamped to shortest chunk.
 /// Concatenate chunks with a linear crossfade of `fade_len` samples.
 pub fn crossfade_concat(chunks: &[Vec<f32>], fade_len: usize) -> Vec<f32> {

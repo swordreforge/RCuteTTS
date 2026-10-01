@@ -98,6 +98,12 @@ options:
   --stream               stream PCM to the wav per AR step (first packet
                          right after prefill + 1 step; raw concat, no
                          trim/pad/crossfade — test mode)
+  --retries N            default 0 (single attempt, bit-identical replay).
+                         N>0: retry a chunk with seed+attempt until it passes
+                         the stability gate (mid-utterance silence holes and
+                         non-tapered abrupt endings are rejected)
+  --hole-thresh F        default 0.005 (patch mean-abs below → hole)
+  --tail-thresh F        default 0.05 (last-patch mean-abs above → cut)
   --model-dir DIR          default <manifest>/../model/CuteTTS-distill
   --threads N              override CUTETTS_THREADS / ncpu
   --help, -h               this message
@@ -535,6 +541,18 @@ fn main() {
     if chunk_seeds != "same" && chunk_seeds != "incr" {
         err("--chunk-seeds must be same or incr");
     }
+    let retries: usize = match arg_val(&args, "--retries") {
+        Some(v) => v.parse().unwrap_or_else(|_| err("--retries must be an integer >= 0")),
+        None => 0,
+    };
+    let hole_thresh: f32 = match arg_val(&args, "--hole-thresh") {
+        Some(v) => v.parse().unwrap_or_else(|_| err("--hole-thresh must be a number")),
+        None => 0.005,
+    };
+    let tail_thresh: f32 = match arg_val(&args, "--tail-thresh") {
+        Some(v) => v.parse().unwrap_or_else(|_| err("--tail-thresh must be a number")),
+        None => 0.05,
+    };
     // Text normalization first (numbers → Chinese), then chunking.
     // TN removes numeric dots, which also makes sentence splitting safer.
     let text = if has_flag(&args, "--no-tn") {
@@ -698,6 +716,9 @@ fn main() {
     // `--output -` pipes raw s16le mono 24k to stdout (players: play/ffplay
     // below); all human logs move to stderr so the pipe stays clean.
     let streaming = has_flag(&args, "--stream");
+    if streaming && retries > 0 {
+        err("--retries with --stream would emit rejected audio; use one or the other");
+    }
     let mut sink_opt: Option<Sink> = if streaming {
         say!(pipe, "stream: incremental write to {out}");
         if pipe {
@@ -721,8 +742,33 @@ fn main() {
         }
         let t1 = Instant::now();
         let bc = BaseCfg { steps: diff_steps, sway, cfg: cfg_strength };
-        let (wav, steps) = synth_one(&w, &tok, piece, cs, max_steps, nth, clone_ctx.as_ref(), sink_opt.as_mut(), pipe,
-            if variant == "base" { Some(&bc) } else { None }, cfg_strength);
+        // P2 auto-retry: attempt seeds cs+0, cs+1, ...; first chunk passing
+        // the stability gate wins. retries=0 keeps legacy single attempt
+        // (bit-identical replay). Gate runs on the RAW chunk wav.
+        let (wav, steps) = {
+            let mut attempt = 0;
+            loop {
+                let cs_try = cs.wrapping_add(attempt as u64);
+                let (w, s) = synth_one(&w, &tok, piece, cs_try, max_steps, nth, clone_ctx.as_ref(), sink_opt.as_mut(), pipe,
+                    if variant == "base" { Some(&bc) } else { None }, cfg_strength);
+                match cutetts_codec::chunk::stability(&w, hole_thresh, tail_thresh) {
+                    cutetts_codec::chunk::Stability::Ok => {
+                        if attempt > 0 {
+                            say!(pipe, "chunk {}: attempt {attempt} accepted (seed={cs_try})", idx + 1);
+                        }
+                        break (w, s);
+                    }
+                    v => {
+                        if attempt >= retries {
+                            say!(pipe, "chunk {}: kept after {} attempts: {v:?} (seed={cs_try})", idx + 1, attempt + 1);
+                            break (w, s);
+                        }
+                        say!(pipe, "chunk {}: rejected attempt {attempt}: {v:?}, retrying", idx + 1);
+                        attempt += 1;
+                    }
+                }
+            }
+        };
         say!(pipe, "chunk {}: {steps} steps, {:.2}s audio ({:.2}s)", idx + 1, wav.len() as f32 / 24000.0, t1.elapsed().as_secs_f32());
         total_steps += steps;
         wavs.push(wav);
