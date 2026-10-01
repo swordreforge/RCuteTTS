@@ -17,8 +17,8 @@ fn transpose_gemm_matches_scatter() {
     let (ci, t) = (xin.shape()[0], xin.shape()[1]);
     let (wi, co, k) = (w3.shape()[0], w3.shape()[1], w3.shape()[2]);
     assert_eq!((ci, wi, co, k, t), (8, 8, 4, 32, 5));
-    let x = xin.into_raw_vec();
-    let wflat = w3.into_raw_vec();
+    let x = xin.into_raw_vec_and_offset().0;
+    let wflat = w3.into_raw_vec_and_offset().0;
     let b = b1.to_vec();
 
     let ref_out =

@@ -49,17 +49,6 @@ impl Hist {
     }
 }
 
-/// Keep the last `keep` columns of each of `rows` rows ([rows, total] -> [rows, keep]).
-fn tail_cols(full: &[f32], rows: usize, total: usize, keep: usize) -> Vec<f32> {
-    assert!(keep <= total);
-    let mut out = vec![0.0f32; rows * keep];
-    for r in 0..rows {
-        out[r * keep..(r + 1) * keep]
-            .copy_from_slice(&full[r * total + total - keep..(r + 1) * total]);
-    }
-    out
-}
-
 pub struct StreamingDecoder<'w> {
     w: &'w DecoderW,
     nth: usize,
@@ -154,7 +143,6 @@ mod tests {
     use super::*;
     use crate::gemm::pack_a;
     use crate::weights::StageW;
-    use crate::dit::DitLinear;
 
     fn fake_stage(s: usize, o: usize, i: usize) -> StageW {
         // trans_gemm rows [M0_0..M0_{s-1}, M1_0..M1_{s-1}], each O x I
@@ -170,7 +158,6 @@ mod tests {
         for r in 0..s * o {
             bp[r] = (r % 7) as f32 * 0.1;
         }
-        let empty = DitLinear { w: pack_a(&[0.0f32; 1], 1, 1), b: vec![0.0], out_dim: 0 };
         StageW {
             alpha: vec![1.0; i],
             trans_gemm: g,

@@ -44,7 +44,6 @@ fn stream_chunks_match_offline() {
         let frames = lat.len() / 64;
         assert_eq!(frames * 64, lat.len());
         let mut dec = StreamingDecoder::new(&w, nth);
-        let t0 = std::time::Instant::now();
         let mut wav = Vec::new();
         let mut first_ms = 0.0f32;
         let mut f = 0;

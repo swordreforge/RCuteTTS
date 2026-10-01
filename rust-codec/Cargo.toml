@@ -10,8 +10,11 @@ crate-type = ["rlib"]
 name = "cutetts-decode"
 path = "src/bin/decode_bench.rs"
 
-[dependencies]
+[dev-dependencies]
+# test-only oracle (simd bf16 cross-check); never linked into the binary
 half = "2"
+
+[dependencies]
 safetensors = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

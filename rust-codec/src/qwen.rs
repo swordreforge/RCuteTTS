@@ -130,7 +130,6 @@ use crate::conv::default_threads;
 use crate::dit::{linear_rows, rms_norm_row, softmax_row};
 use crate::simd::{resolve_saxpy, run_gemv8, SaxpyKind};
 
-const Q_RMS_EPS: f32 = 1e-6;
 const Q_ATTN_SCALE: f32 = 1.0 / 11.3137085; // 1/sqrt(128)
 const Q_KV_DIM: usize = Q_KV * Q_HEAD_DIM; // 1024
 const Q_Q_DIM: usize = Q_HEADS * Q_HEAD_DIM; // 2048
@@ -572,8 +571,10 @@ mod tests {
         a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
     }
 
+    #[test]
     fn qk_rope_stages_vs_torch() {
         // Stage-by-stage for token 1: raw q-proj -> qn -> rope, k rope.
+        // NOTE: this fn lacked #[test] and never ran; enabled for verification.
         // T=1 passed, so norm/mlp/o_proj are trusted; this isolates the Q side.
         for li in [0usize, 6usize] {
             println!("== layer {li} stages ==");
@@ -581,7 +582,11 @@ mod tests {
         }
     }
 
-    fn stage_one_layer(li: usize) {
+    fn stage_one_layer(_li: usize) {
+        // NOTE: `_li` is intentionally unused — the dbg_* fixtures below are
+        // layer-0 data, so both loop iterations check layer 0 (diagnostic
+        // probe, prints only, no asserts; cf. layer6_causal_clean_checks
+        // for the layer-6 gate).
         let wpath = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../model/CuteTTS-distill/weights/tts/model.safetensors");
         if !wpath.is_file() {

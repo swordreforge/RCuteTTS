@@ -12,7 +12,7 @@ fn td(name: &str) -> PathBuf {
 fn load2(name: &str) -> (Vec<f32>, usize, usize) {
     let a: ndarray::Array2<f32> = read_npy(td(name)).unwrap();
     let (c, t) = (a.shape()[0], a.shape()[1]);
-    (a.into_raw_vec(), c, t)
+    (a.into_raw_vec_and_offset().0, c, t)
 }
 
 fn load1(name: &str) -> Vec<f32> {
@@ -23,7 +23,7 @@ fn load1(name: &str) -> Vec<f32> {
 fn load3(name: &str) -> (Vec<f32>, usize, usize, usize) {
     let a: ndarray::Array3<f32> = read_npy(td(name)).unwrap();
     let s = a.shape().to_vec();
-    (a.into_raw_vec(), s[0], s[1], s[2])
+    (a.into_raw_vec_and_offset().0, s[0], s[1], s[2])
 }
 
 fn max_err(a: &[f32], b: &[f32]) -> f32 {
