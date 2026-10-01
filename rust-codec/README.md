@@ -60,6 +60,12 @@ random seed each run (`seed 0` is remapped — xorshift guard).
 loudness leveling (speech-RMS to median, `--no-level` off) → 0.15 s tail
 pad → 30 ms crossfade → peak 0.98. `--text` stays single-shot.
 `--stream` emits raw PCM per AR step instead (no trim/level/crossfade).
+`--retries N` re-draws unstable chunks (silence holes / abrupt ends).
+`--profile-steps` prints per-phase p50/p99 (Stage 0 instrument).
+
+Base variant (`--model-dir ../model/CuteTTS`): 10-step sway Euler +
+dual-branch LM-CFG; CFG panel fusion is on by default (bitwise identical
+to unfused, `--no-fusion` escapes). Pinned P-cores: DiT -25%, RTF 1.17→0.95.
 
 Measured on this box (22 threads): prefill T=26 ≈ 0.07 s,
 AR ≈ 40 ms/step offline (≈ 91 ms streamed, incl. per-packet VAE),
@@ -75,7 +81,9 @@ streamed pipe RTF ≈ 1.0.
   leveling kills ±loudness, but prosody doesn't carry across chunks.
 - Free-run length/content is chaotic (torch self-noise flips stop/length
   ~10×). Never expect two different seeds to agree; pick good seeds.
-- Base model (`model/CuteTTS`, 10-step CFG) is not wired yet (distill only).
+- Base model (`model/CuteTTS`, 10-step CFG) is wired (`--model-dir` +
+  `--cfg-strength/--sway/--diffusion-steps`); base voice_clone included.
+  Base costs ~3× distill per step (RTF ~1.3 unpinned, ~0.95 pinned+fused).
 - Prefill micro-gap vs torch (0.061 vs 0.040 @T=48) frozen: DRAM-bandwidth
   wall (fp32 vs torch bf16), 2–3% of total.
 
