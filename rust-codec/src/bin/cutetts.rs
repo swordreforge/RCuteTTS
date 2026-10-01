@@ -84,7 +84,8 @@ options:
                            ... --output - | ffplay -f s16le -ar 24000 -ac 1 -i -
   --seed N                 u64 seed; default = random each run (printed, reuse to replay)
   --cfg-strength F         default 2.0 (base: LM-CFG strength; distill: distilled CFG in [0,5])
-  --sway F                 default -0.8, base only (distill rejects nonzero)
+  --sway F                 base default -0.8, distill default 0.0
+                         (distill rejects nonzero: sway is base-only)
   --diffusion-steps N      default 4 (distill: 1|2|4) or 10 (base, >= 1)
   --max-steps N            default 750 (each step = 2 latent frames = 0.16s)
   --chunk-seeds same|incr default same (one seed for all chunks: stable
@@ -607,7 +608,13 @@ fn main() {
     }
     let sway: f32 = match arg_val(&args, "--sway") {
         Some(v) => v.parse().unwrap_or_else(|_| err("--sway must be a number")),
-        None => -0.8,
+        None => {
+            if variant == "base" {
+                -0.8
+            } else {
+                0.0
+            }
+        }
     };
     let diff_steps: usize = match arg_val(&args, "--diffusion-steps") {
         Some(v) => v.parse().unwrap_or_else(|_| err("--diffusion-steps must be an integer")),
