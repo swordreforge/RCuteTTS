@@ -200,3 +200,13 @@
 - 结论：性能工作从 DiT 开始。Stage 1 = bf16-DiT（fp32 累加，流量减半，
   预期步进 -40%）；Stage 2 = int8/Q4（待 Stage 1 门禁过后再议）。
   杀线：Stage 1 必须实测 RTF 增益 + 耳验 A/B 通过，否则关闭。
+
+## 25. P3 WER 链路（M32：工具链通，基线见下）
+- ASR：FunASR paraformer-zh（CPU，uv + tuna 源安装；modelscope 拉模型通；
+  file-path 输入在其 audio loader 上 SIGSEGV，改走 numpy 桥接；24k→16k scipy）。
+- 基线（2026-10-02）：en-short ×2 WER 0.000；zh-num-decimal CER 0.000；
+  zh-num-year-pct CER 0.000；zh-num-model CER 0.150（3 错全在 "Qwen" 拉丁首字母，
+  ASR 弱项非 TTS——paraformer 对生僻拉丁转写成汉字，RTF/H 等常见缩写可辨）。
+- 结论：TN 数字链（小数/年份/百分/量词）在中文语境下端到端全对；
+  拉丁型号词（Qwen/H100/RTX）超出本 ASR 测量能力，继续用耳朵仲裁。
+  回归集：scripts/wer_manifest.json（5 case：文本/seed/ref_tn 锁定）。
