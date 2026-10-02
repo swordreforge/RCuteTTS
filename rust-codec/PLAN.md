@@ -215,3 +215,17 @@
 - 对照：base_s7.wav（我们，13 步 2.08s）vs torch_base_en42.wav（13 步 2.08s），
   另附 base_en42.wav（12 步吞尾）作反例参照。
 - 结论：清晰度 ok、自然度 ok、无怪音。base tts 线可交付。
+
+## 27. Clone/长文耳验通过（2026-10-02）
+- base voice_clone（base_clone_trim.wav，1.6s）：ok。
+- 长文语音克隆一致性：ok（包间音色稳定，leveling + same-seed 生效）。
+- base/clone 功能线至此全部交付（tts/distill/base + clone/distill/base）。
+
+## 28. Backlog：长文语音"电话音"（用户听感，延后）
+- 现象：相对 QORA-TTS-12Hz-1.7B，我们的长文语音清晰度低、高频闷，
+  似电话音。短句不明显，随时长累积感知。
+- 候选方向（未验证，不排序）：VAE 重建上限（12Hz latent/24k 带宽）、
+  包接缝 crossfade 吃瞬态、leveling 压动态、混叠在 trim 边界、
+  小模型声学建模本身 vs 1.7B。
+- 动手前置条件：可复现的 A/B 对（同文本长文双版本）+ 频谱对比
+  （高频滚降曲线），先量再动——沿用门禁0规矩。
