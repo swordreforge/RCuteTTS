@@ -249,3 +249,11 @@
 - 对照实验：同 seed `--no-level` 版 /tmp/opencode/along_nolevel.wav
   （251.74s，仅关 leveling，其余一致）供耳验 A/B——若电话感消失，
   则leveling 改部分压缩（gain^0.5）或按段落锚定；若仍在，查 rate/seams。
+
+## 31. 电话音 verdict：模型族通病（2026-10-02，用户耳验终裁）
+- base clone 长文（along_base_clone.wav，同 ref 同 seed）与 distill 版
+  几乎无差，一致感冒音。结合此前测量（pyin HNR 持平、ECAPA 同一人、
+  共振峰持平、高频不缺、leveling 对照无效），排除链路/打包/精度全部
+  嫌疑，定性为 CuteTTS 小模型族声学上限（0.13B DiT+VAE vs 1.7B 系统）。
+- 本仓库内关闭此题。唯一剩余杠杆：外接 enhancement 模型（见 DEFERRED #5，
+  待立项）。不再投入 port 侧测量。
