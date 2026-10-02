@@ -237,3 +237,15 @@
 - 长文（distill，39 包，260s）：CER 0.093 / CER-cjk 0.043；中文体完整无跳句，
   TN 数字全对；误差几乎全是拉丁/ASR 税。为此加 --cjk-only 与 --hyp-cache。
 - 回归集 5→8 case。工具链教训：本机 file-path 输入 SIGSEGV（走 numpy 桥接）。
+
+## 30. 电话音排查（M34：噪声假设已死）
+-  crude HNR-proxy 报 2.6dB 差，但同尺子量自家两文件差出 10dB——proxy 对
+  音色/语速敏感，不可作计量依据，撤回该数字。
+- pyin HNR（浊音帧基频自相关，同算法双边）：短句 7.69 vs 7.86dB，
+  长文 8.06 vs 8.38dB——帧级噪声基本无差。电话感不是底噪/谐波问题。
+- 剩余嫌疑（排序）：①leveling 压平段落动态（增益 0.63~1.74，典型
+  "processed" 签名）；②整体快 10%（251s vs 278s，同文本同音色）；
+  ③39 个 crossfade 接缝 + 包独立韵律重启；④整体偏亮（质心 +85Hz）。
+- 对照实验：同 seed `--no-level` 版 /tmp/opencode/along_nolevel.wav
+  （251.74s，仅关 leveling，其余一致）供耳验 A/B——若电话感消失，
+  则leveling 改部分压缩（gain^0.5）或按段落锚定；若仍在，查 rate/seams。
