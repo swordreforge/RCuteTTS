@@ -1,1 +1,73 @@
-{"cases": [{"lang": "en", "ref_tn": "Hello world, this is a test.", "seed": 42, "tag": "en-short-base", "text": "Hello world, this is a test.", "variant": "base"}, {"lang": "en", "ref_tn": "Hello world, this is a test.", "seed": 7, "tag": "en-short-base-s7", "text": "Hello world, this is a test.", "variant": "base"}, {"lang": "zh", "ref_tn": "官方理论延迟低至九十七毫秒，RTF为四点七八。", "seed": 7, "tag": "zh-num-decimal", "text": "官方理论延迟低至97毫秒，RTF为4.78。", "variant": "distill"}, {"lang": "zh", "ref_tn": "二零二零年的笔记本性能提升了百分之三十五。", "seed": 7, "tag": "zh-num-year-pct", "text": "2020年的笔记本性能提升了35%。", "variant": "distill"}, {"lang": "zh", "ref_tn": "Qwen三在H一零零上只需一百七十一毫秒。", "seed": 7, "tag": "zh-num-model", "text": "Qwen3在H100上只需171毫秒。", "variant": "distill"}], "howto": "1. cutetts --text TEXT --output <tag>.wav --seed SEED [--model-dir ../model/CuteTTS]; 2. wer_eval.py <tag>.wav <ref_tn_file> --lang <lang>  (ref_tn = exact spoken text above; regenerate with --print-chunks to double-check TN)"}
+{
+ "cases": [
+  {
+   "lang": "en",
+   "ref_tn": "Hello world, this is a test.",
+   "seed": 42,
+   "tag": "en-short-base",
+   "text": "Hello world, this is a test.",
+   "variant": "base"
+  },
+  {
+   "lang": "en",
+   "ref_tn": "Hello world, this is a test.",
+   "seed": 7,
+   "tag": "en-short-base-s7",
+   "text": "Hello world, this is a test.",
+   "variant": "base"
+  },
+  {
+   "lang": "zh",
+   "ref_tn": "官方理论延迟低至九十七毫秒，RTF为四点七八。",
+   "seed": 7,
+   "tag": "zh-num-decimal",
+   "text": "官方理论延迟低至97毫秒，RTF为4.78。",
+   "variant": "distill"
+  },
+  {
+   "lang": "zh",
+   "ref_tn": "二零二零年的笔记本性能提升了百分之三十五。",
+   "seed": 7,
+   "tag": "zh-num-year-pct",
+   "text": "2020年的笔记本性能提升了35%。",
+   "variant": "distill"
+  },
+  {
+   "lang": "zh",
+   "ref_tn": "Qwen三在H一零零上只需一百七十一毫秒。",
+   "seed": 7,
+   "tag": "zh-num-model",
+   "text": "Qwen3在H100上只需171毫秒。",
+   "variant": "distill"
+  },
+  {
+   "tag": "neg-tailcut",
+   "text": "Hello world, this is a test.",
+   "seed": 42,
+   "variant": "base",
+   "lang": "en",
+   "ref_tn": "Hello world, this is a test.",
+   "note": "12-step early stop, tail cut audible to ears; WER expected 0.000 (ASR LM completion) - documents WER blindness to predictable tails, NOT a pass gate"
+  },
+  {
+   "tag": "neg-midhole",
+   "text": "Hello world, this is a test.",
+   "seed": 123,
+   "variant": "base",
+   "lang": "en",
+   "ref_tn": "Hello world, this is a test.",
+   "note": "0.00-energy hole at patch 5; WER expected 0.000 (gaps delete no words) - hole detection belongs to the stability energy gate, NOT WER"
+  },
+  {
+   "tag": "long-distill-39chunks",
+   "text": "result.txt full article",
+   "seed": 67,
+   "variant": "distill",
+   "lang": "zh",
+   "cjk_only": true,
+   "ref_tn": "Qwen三-TTS 的实时性非常出色，其理论延迟和优化后的性能完全可以满足实时交互场景的需求。不过，实际表现高度依赖于你的硬件配置、是否启用流式生成，以及是否使用了社区的性能优化方案。官方理论延迟低至 九十七 毫秒。Qwen三-TTS 在设计上强调极低延迟的流式生成。其技术报告和官方文档宣称，通过双轨混合流式架构，端到端合成延迟可以低至 九十七 毫秒。这意味着从输入文本到输出第一段音频包，理论延迟不到 零点一 秒，足以支持实时对话应用。所有 Qwen三-TTS 模型，包括 一点七B 和 零点六B 版本，都开箱即支持流式生成。实际性能取决于推理后端。RTF 是实时因子，RTF 小于 一点零 表示生成速度快于实时播放。硬件和方案表现如下。RTX 四零九零 使用 CUDA Graphs 优化，RTF 为 四点七八，一点七B 模型；零点六B 模型 RTF 为 五点五三。首包延迟分别为 一百七十一 毫秒和 一百五十四 毫秒。通过 CUDA Graphs 消除 Python 开销，性能远超官方参考实现。RTX 五零五零 使用 GGUF 和 llama.cpp，RTF 为 零点三五，首包延迟可低至 三百 毫秒内。将 LLM 部分用 llama.cpp 加速，一点七B 模型在消费级显卡上轻松实时。H一零零 八十GB 优化后，零点六B 模型 RTF 为 四点一九，首包延迟 二百二十四 毫秒。Jetson AGX Orin 优化后，零点六B 模型 RTF 为 一点五七，首包延迟 五百五十六 毫秒。Apple M一 使用纯 C 引擎和 int八，零点六B 模型 RTF 为 零点八零 到 零点九零，首音频约 零点五 秒。二零二零年的笔记本 CPU 上，纯 C 引擎通过 int八 量化即可突破实时门槛。官方参考实现在 Jetson Orin 上，RTF 为 零点一七五，首包延迟 二千五百七十二 毫秒。未优化的参考代码性能很差，一 秒音频需 五点七 秒生成，凸显优化的重要性。CPU 端性能是关键考量。纯 C 引擎加 int八 量化方案中，有开发者用纯 C 重写了 Qwen三-TTS 的推理引擎，完全不需要 Python、PyTorch 或 GPU。在 Apple M一 上，通过 int八 量化和 SIMD 优化，例如 AVX二 和 AVX五一二，RTF 可以降到 零点八 到 零点九，即比实时播放还要快。这证明了在 x八六 CPU 上实现实时的潜力。OpenVINO 加速方案中，Intel 的 OpenVINO 工具套件也可以用于加速 Qwen三-TTS 在 CPU 上的推理，有实战教程可供参考。GGUF 方案中，通过 Qwen三-TTS-GGUF 项目，你可以在 CPU 上以 RTF 一点三 的速度运行，虽然略慢于实时，但配合流式生成，感知延迟可以接受。总结与建议。Qwen三-TTS 的实时性潜力巨大，但裸跑官方代码无法发挥其真实实力。如果你使用 GPU，追求极致性能，可以关注 CUDA Graphs 优化方案，RTF 可达 四 到 五 以上。如果显卡一般，GGUF 加 llama.cpp 方案，RTF 约 零点三五，是更务实的选择。如果你坚持纯 CPU，纯 C 引擎加 int八 量化方案，RTF 约 零点八 到 零点九，是目前实现 CPU 实时的最佳路径，但它需要你编译和部署第三方引擎，而非简单的 pip install。关于流式生成，务必启用它。Qwen三-TTS 的流式生成不是简单的分段输出，而是在单个字符输入后即可输出第一个音频包。即使整体 RTF 略大于 一，流式生成也能让你在几百毫秒内听到声音，大幅提升交互体验。结合你 二 核 二G 的服务器，纯 CPU 实时运行 Qwen三-TTS一点七B 会非常吃力。即便使用 int八 量化，二 个 vCPU 的核心数也远少于 M一，RTF 很可能远高于 一。如果必须在服务器上部署，零点六B 模型加纯 C int八 引擎加流式生成，是唯一可能接近实时的组合，但你需要对速度有合理的预期。",
+   "note": "baseline CER 0.093 / CER-cjk 0.043 (2026-10-02); Latin tax dominates; CJK body complete, no skips"
+  }
+ ],
+ "howto": "1. cutetts --text TEXT --output <tag>.wav --seed SEED [--model-dir ../model/CuteTTS]; 2. wer_eval.py <tag>.wav <ref_tn_file> --lang <lang>  (ref_tn = exact spoken text above; regenerate with --print-chunks to double-check TN); neg_* cases pin ASR behavior (expected 0.000 - see notes); long case tracks CER + CER-cjk"
+}
