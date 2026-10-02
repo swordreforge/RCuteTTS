@@ -210,3 +210,8 @@
 - 结论：TN 数字链（小数/年份/百分/量词）在中文语境下端到端全对；
   拉丁型号词（Qwen/H100/RTX）超出本 ASR 测量能力，继续用耳朵仲裁。
   回归集：scripts/wer_manifest.json（5 case：文本/seed/ref_tn 锁定）。
+
+## 26. Base A/B 耳验通过（2026-10-02）
+- 对照：base_s7.wav（我们，13 步 2.08s）vs torch_base_en42.wav（13 步 2.08s），
+  另附 base_en42.wav（12 步吞尾）作反例参照。
+- 结论：清晰度 ok、自然度 ok、无怪音。base tts 线可交付。
